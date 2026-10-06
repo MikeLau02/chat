@@ -1,0 +1,24 @@
+{
+  "name": "chatbot-vision-mundial",
+  "version": "1.0.0",
+  "description": "Chatbot institucional de WhatsApp del Colegio Visión Mundial",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "simular": "node test/simular.js",
+    "test:webhook": "node test/webhook.js",
+    "test:instalacion": "node test/instalacion.js",
+    "test:panel": "node test/panel.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "mysql2": "^3.24.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

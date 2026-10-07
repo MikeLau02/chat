@@ -52,7 +52,11 @@ function yaProcesado(id) {
 }
 
 app.post('/webhook', (req, res) => {
-  if (!whatsapp.firmaValida(req.cuerpoCrudo, req.get('x-hub-signature-256'))) return res.sendStatus(401);
+  if (!whatsapp.firmaValida(req.cuerpoCrudo, req.get('x-hub-signature-256'))) {
+    console.warn('Webhook rechazado: la firma no coincide. Revisa WHATSAPP_APP_SECRET en Render.');
+    return res.sendStatus(401);
+  }
+  console.log('Webhook recibido de Meta');
   res.sendStatus(200);
 
   for (const entry of req.body.entry || []) {
@@ -74,9 +78,17 @@ async function atender(msg) {
   else if (msg.type === 'button') entrada = msg.button?.text || '';
   else esTexto = false;
 
+  console.log(`Mensaje de ...${telefono.slice(-4)}: tipo ${msg.type}`);
   whatsapp.marcarLeido(msg.id).catch(() => {});
   const mensajes = await responder(telefono, entrada, { esTexto });
-  for (const m of mensajes) await whatsapp.enviar(telefono, m);
+  for (const m of mensajes) {
+    try {
+      await whatsapp.enviar(telefono, m);
+    } catch (err) {
+      console.error(`No se pudo enviar la respuesta a ...${telefono.slice(-4)}:`, err.message);
+      throw err;
+    }
+  }
 }
 
 if (require.main === module) {
@@ -86,4 +98,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-

@@ -17,6 +17,9 @@ module.exports = {
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
     graphVersion: process.env.GRAPH_API_VERSION || 'v23.0',
   },
+  // Dirección pública del servidor, para que Meta descargue las imágenes y PDF que
+  // se suben en el panel. Render la pone sola en RENDER_EXTERNAL_URL.
+  get urlPublica() { return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''); },
   // Minutos que el bot recuerda en qué paso del menú va cada usuario.
   minutosSesion: Number(process.env.MINUTOS_SESION || 30),
 };

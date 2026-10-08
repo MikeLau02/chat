@@ -11,6 +11,7 @@ app.use(express.json({ verify: (req, _res, buf) => { req.cuerpoCrudo = buf; } })
 
 app.get('/', (_req, res) => res.send('Chatbot Colegio Visión Mundial: en línea'));
 app.use('/panel', panel);
+app.use('/archivos', require('./archivos').router);
 
 // Política de privacidad: Meta pide su enlace para publicar la app.
 const PRIVACIDAD = `<!doctype html><html lang="es"><head><meta charset="utf-8">

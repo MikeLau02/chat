@@ -5,9 +5,14 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { consulta, una } = require('./db');
 const whatsapp = require('./whatsapp');
+const archivos = require('./archivos');
 
 const router = express.Router();
-router.use(express.urlencoded({ extended: false }));
+// Los formularios de subida (rutas que terminan en /archivo) traen el archivo en
+// base64 y se leen más abajo, con un límite mayor y solo después de iniciar sesión.
+const formularioNormal = express.urlencoded({ extended: false });
+const formularioArchivo = express.urlencoded({ extended: false, limit: '15mb' });
+router.use((req, res, next) => (req.path.endsWith('/archivo') ? next() : formularioNormal(req, res, next)));
 
 const SECRETO = process.env.PANEL_SECRET || crypto.randomBytes(32).toString('hex');
 const HORAS_SESION = 12;
@@ -56,6 +61,7 @@ function pagina(titulo, cuerpo, admin, aviso = '') {
       <a href="/panel/asesor">Asesor</a>
       <a href="/panel/actividades">Actividades</a>
       <a href="/panel/circular">Circular</a>
+      <a href="/panel/horarios">Horarios</a>
       <a href="/panel/enlaces">Enlaces y textos</a>
       <a href="/panel/sin-respuesta">Sin respuesta</a>
       <a href="/panel/cuentas">Cuentas</a>
@@ -111,6 +117,36 @@ const volver = (res, ruta, mensaje, error = false) =>
   res.redirect(`${ruta}?${error ? 'error' : 'ok'}=${encodeURIComponent(mensaje)}`);
 
 const envolver = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+// Formulario de subida: el navegador convierte el archivo en base64 y lo envía
+// en un campo normal, así no hace falta una librería para formularios multipart.
+function formularioSubida(accion, { acepta, etiqueta, boton, maximoMb }) {
+  return `<form class="caja subida" method="post" action="${accion}" data-maximo="${maximoMb}">
+      <label>${etiqueta} <input type="file" accept="${acepta}" required></label>
+      <input type="hidden" name="archivo"><input type="hidden" name="nombre">
+      <button class="boton">${boton}</button>
+    </form>`;
+}
+
+const SCRIPT_SUBIDA = `<script>
+document.querySelectorAll('form.subida').forEach((f) => f.addEventListener('submit', (e) => {
+  if (f.dataset.listo) return;
+  e.preventDefault();
+  const archivo = f.querySelector('input[type=file]').files[0];
+  if (!archivo) return;
+  if (archivo.size > Number(f.dataset.maximo) * 1048576) { alert('El archivo pesa más de ' + f.dataset.maximo + ' MB.'); return; }
+  const lector = new FileReader();
+  lector.onload = () => {
+    f.querySelector('input[name=archivo]').value = lector.result;
+    f.querySelector('input[name=nombre]').value = archivo.name.replace(/\\.[^.]+$/, '');
+    f.dataset.listo = '1';
+    f.querySelector('button').disabled = true;
+    f.querySelector('button').textContent = 'Subiendo…';
+    f.submit();
+  };
+  lector.readAsDataURL(archivo);
+}));
+</script>`;
 
 // ---------------------------------------------------------------------
 // Ingreso
@@ -382,29 +418,46 @@ router.post('/actividades/:id/publicar', envolver(async (req, res) => {
 router.get('/circular', envolver(async (req, res) => {
   const actual = await una('SELECT * FROM circulares WHERE es_actual = 1');
   const anteriores = await consulta('SELECT * FROM circulares WHERE es_actual = 0 ORDER BY fecha_publicacion DESC LIMIT 10');
+  const pdfs = await archivos.listar('circular');
+  const filaPdf = (c) => {
+    const pdf = pdfs.get(c.id);
+    const estado = pdf ? `<a href="${esc(pdf.ruta)}" target="_blank" rel="noopener">PDF subido</a>`
+      : c.archivo_url ? `<a href="${esc(c.archivo_url)}" target="_blank" rel="noopener">Enlace</a>` : '<span class="gris">Sin PDF</span>';
+    return `${estado}
+      <details><summary>${pdf ? 'Cambiar' : 'Subir'} PDF</summary>
+        ${formularioSubida(`/panel/circular/${c.id}/archivo`, { acepta: 'application/pdf', etiqueta: 'PDF (máximo 10 MB)', boton: 'Subir PDF', maximoMb: 10 })}
+        ${pdf ? `<form method="post" action="/panel/circular/${c.id}/borrar-pdf"><button class="link">Quitar el PDF subido</button></form>` : ''}
+      </details>`;
+  };
   res.send(pagina('Circular actual', `
     ${actual ? `<p>El bot envía la <b>Circular N° ${esc(actual.numero)}</b>: ${esc(actual.titulo)} (${esc(actual.fecha_publicacion)}).
-      ${actual.archivo_url ? `<a href="${esc(actual.archivo_url)}" target="_blank" rel="noopener">Ver PDF</a>` : '<br><span class="gris">Sin PDF: el bot solo envía el título y el enlace de Comunicaciones.</span>'}</p>` : '<p>No hay circular actual.</p>'}
+      ${pdfs.get(actual.id) ? `<a href="${esc(pdfs.get(actual.id).ruta)}" target="_blank" rel="noopener">Ver PDF subido</a>`
+        : actual.archivo_url ? `<a href="${esc(actual.archivo_url)}" target="_blank" rel="noopener">Ver PDF (enlace)</a>`
+          : '<br><span class="gris">Sin PDF: el bot solo envía el título y el enlace de Comunicaciones.</span>'}</p>` : '<p>No hay circular actual.</p>'}
     <h2>Publicar una circular nueva</h2>
-    <p class="gris">La nueva reemplaza a la actual en el bot. El PDF debe estar en un enlace público que termine en .pdf o se abra directo (por ejemplo, la página del colegio).</p>
+    <p class="gris">La nueva reemplaza a la actual en el bot. Después de publicarla puedes subir su PDF aquí mismo; el bot lo envía como documento. El enlace es opcional y solo se usa si no subes el PDF.</p>
     <form class="caja" method="post" action="/panel/circular">
       <div class="fila2">
         <label>Número <input name="numero" required maxlength="20" placeholder="10"></label>
         <label>Fecha <input type="date" name="fecha_publicacion" required></label>
       </div>
       <label>Título <input name="titulo" required maxlength="200"></label>
-      <label>Enlace del PDF <input type="url" name="archivo_url"></label>
+      <label>Enlace del PDF (opcional) <input type="url" name="archivo_url"></label>
       <button class="boton">Publicar como circular actual</button>
     </form>
-    ${actual ? `<h2>Cambiar el PDF de la circular actual</h2>
+    ${actual ? `<h2>PDF de la circular actual</h2>
+    ${formularioSubida(`/panel/circular/${actual.id}/archivo`, { acepta: 'application/pdf', etiqueta: 'PDF de la circular (máximo 10 MB)', boton: 'Subir PDF', maximoMb: 10 })}
+    ${pdfs.get(actual.id) ? `<form method="post" action="/panel/circular/${actual.id}/borrar-pdf"><button class="link">Quitar el PDF subido</button></form>` : ''}
+    <details><summary>Usar un enlace en lugar de subir el PDF</summary>
     <form class="caja" method="post" action="/panel/circular/${actual.id}/pdf">
       <label>Enlace del PDF <input type="url" name="archivo_url" value="${esc(actual.archivo_url || '')}"></label>
       <button class="boton secundario">Guardar enlace</button>
-    </form>` : ''}
+    </form></details>` : ''}
     <h2>Anteriores</h2>
-    <table><tr><th>N°</th><th>Título</th><th>Fecha</th></tr>
-      ${anteriores.map((c) => `<tr><td>${esc(c.numero)}</td><td>${esc(c.titulo)}</td><td>${esc(c.fecha_publicacion)}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
-    </table>`, req.admin, avisoDe(req)));
+    <p class="gris">Las que tengan PDF aparecen en el bot como "Circulares anteriores" (las 5 más recientes) y se envían como documento.</p>
+    <div class="scroll"><table><tr><th>N°</th><th>Título</th><th>Fecha</th><th>PDF</th></tr>
+      ${anteriores.map((c) => `<tr><td>${esc(c.numero)}</td><td>${esc(c.titulo)}</td><td>${esc(c.fecha_publicacion)}</td><td>${filaPdf(c)}</td></tr>`).join('') || '<tr><td colspan="4">—</td></tr>'}
+    </table></div>${SCRIPT_SUBIDA}`, req.admin, avisoDe(req)));
 }));
 
 router.post('/circular', envolver(async (req, res) => {
@@ -418,10 +471,60 @@ router.post('/circular', envolver(async (req, res) => {
   return volver(res, '/panel/circular', `Circular N° ${numero} publicada.`);
 }));
 
+router.post('/circular/:id/archivo', formularioArchivo, envolver(async (req, res) => {
+  const c = await una('SELECT id, numero FROM circulares WHERE id = ?', [req.params.id]);
+  if (!c) return volver(res, '/panel/circular', 'No existe esa circular.', true);
+  const buffer = archivos.desdeDataUrl(req.body.archivo);
+  const error = archivos.validar(buffer, 'pdf');
+  if (error) return volver(res, '/panel/circular', error, true);
+  await archivos.guardar('circular', c.id, `Circular-${c.numero}`, buffer, req.admin.id);
+  return volver(res, '/panel/circular', `PDF de la circular N° ${c.numero} guardado. El bot ya lo envía como documento.`);
+}));
+
+router.post('/circular/:id/borrar-pdf', envolver(async (req, res) => {
+  await archivos.borrar('circular', Number(req.params.id));
+  volver(res, '/panel/circular', 'PDF quitado.');
+}));
+
 router.post('/circular/:id/pdf', envolver(async (req, res) => {
   await consulta('UPDATE circulares SET archivo_url = ? WHERE id = ?',
     [String(req.body.archivo_url || '').trim() || null, req.params.id]);
   volver(res, '/panel/circular', 'Enlace guardado.');
+}));
+
+// ---------------------------------------------------------------------
+// Imagen del horario de cada grupo
+// ---------------------------------------------------------------------
+
+router.get('/horarios', envolver(async (req, res) => {
+  const grupos = await consulta('SELECT id, nombre FROM grupos WHERE activo = 1 ORDER BY orden, nombre');
+  const imagenes = await archivos.listar('horario_grupo');
+  const filas = grupos.map((g) => {
+    const img = imagenes.get(g.id);
+    return `<tr><td><b>${esc(g.nombre)}</b></td>
+      <td>${img ? `<a href="${esc(img.ruta)}" target="_blank" rel="noopener"><img src="${esc(img.ruta)}" alt="Horario ${esc(g.nombre)}" style="max-width:120px;max-height:90px;border:1px solid var(--borde)"></a>` : '<span class="gris">Sin imagen</span>'}</td>
+      <td>${formularioSubida(`/panel/horarios/${g.id}/archivo`, { acepta: 'image/jpeg,image/png', etiqueta: img ? 'Cambiar imagen' : 'Subir imagen', boton: 'Guardar', maximoMb: 5 })}
+        ${img ? `<form method="post" action="/panel/horarios/${g.id}/borrar"><button class="link">Quitar imagen</button></form>` : ''}</td></tr>`;
+  }).join('');
+  res.send(pagina('Horario en imagen por grupo', `
+    <p class="gris">Cuando alguien pide el horario de un grupo que tiene imagen, el bot le envía la imagen y luego le ofrece ver cada día en texto. Imagen JPG o PNG, máximo 5 MB.</p>
+    <div class="scroll"><table><tr><th>Grupo</th><th>Imagen</th><th></th></tr>${filas}</table></div>
+    ${SCRIPT_SUBIDA}`, req.admin, avisoDe(req)));
+}));
+
+router.post('/horarios/:id/archivo', formularioArchivo, envolver(async (req, res) => {
+  const g = await una('SELECT id, nombre FROM grupos WHERE id = ? AND activo = 1', [req.params.id]);
+  if (!g) return volver(res, '/panel/horarios', 'No existe ese grupo.', true);
+  const buffer = archivos.desdeDataUrl(req.body.archivo);
+  const error = archivos.validar(buffer, 'imagen');
+  if (error) return volver(res, '/panel/horarios', error, true);
+  await archivos.guardar('horario_grupo', g.id, `Horario-${g.nombre}`, buffer, req.admin.id);
+  return volver(res, '/panel/horarios', `Imagen del horario de ${g.nombre} guardada.`);
+}));
+
+router.post('/horarios/:id/borrar', envolver(async (req, res) => {
+  await archivos.borrar('horario_grupo', Number(req.params.id));
+  volver(res, '/panel/horarios', 'Imagen quitada.');
 }));
 
 // ---------------------------------------------------------------------

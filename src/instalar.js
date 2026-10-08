@@ -20,7 +20,7 @@ function adaptar(sql) {
 
 // Archivos de datos que se recargan cuando cambian. Cada uno debe poder
 // ejecutarse varias veces (borra y vuelve a insertar lo suyo).
-const DATOS = ['horario_2026.sql', 'contenidos.sql'];
+const DATOS = ['migraciones.sql', 'horario_2026.sql', 'contenidos.sql'];
 
 async function instalarSiHaceFalta() {
   const conexion = await mysql.createConnection({ ...opciones(databaseUrl), multipleStatements: true, charset: 'utf8mb4' });

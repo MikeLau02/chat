@@ -81,13 +81,24 @@ async function atender(msg) {
 
   console.log(`Mensaje de ...${telefono.slice(-4)}: tipo ${msg.type}`);
   whatsapp.marcarLeido(msg.id).catch(() => {});
-  const mensajes = await responder(telefono, entrada, { esTexto });
+  let mensajes;
+  try {
+    mensajes = await responder(telefono, entrada, { esTexto });
+  } catch (err) {
+    console.error(`Error preparando la respuesta para ...${telefono.slice(-4)}:`, err);
+    mensajes = [{ tipo: 'texto', texto: 'Tuvimos un problema al responder. Intenta de nuevo o escribe 0 para ir al menú principal.' }];
+  }
   for (const m of mensajes) {
     try {
       await whatsapp.enviar(telefono, m);
     } catch (err) {
-      console.error(`No se pudo enviar la respuesta a ...${telefono.slice(-4)}:`, err.message);
-      throw err;
+      console.error(`No se pudo enviar la respuesta (${m.tipo || 'texto'}) a ...${telefono.slice(-4)}:`, err.message);
+      // Si falla una imagen o un PDF, se manda como texto con el enlace y se sigue con lo demás.
+      if (m.tipo === 'imagen' || m.tipo === 'documento') {
+        const alterno = [m.texto, m.url].filter(Boolean).join('\n');
+        await whatsapp.enviar(telefono, { tipo: 'texto', texto: alterno })
+          .catch((e) => console.error('Tampoco se pudo enviar el texto alterno:', e.message));
+      }
     }
   }
 }

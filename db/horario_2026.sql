@@ -47,7 +47,22 @@ INSERT INTO asignaturas (codigo_excel, nombre) VALUES
   ('EMPREND', 'Emprendimiento'),
   ('D_COM', 'Dimensión Comunicativa'),
   ('D_ETICA', 'Dimensión Ética'),
-  ('D_COG', 'Dimensión Cognitiva')
+  ('D_COG', 'Dimensión Cognitiva'),
+  ('VAR_ac9a1d53', 'Lengua Castellana / Inglés / Matemáticas'),
+  ('VAR_0ed3eb2b', 'Lengua Castellana / Matemáticas'),
+  ('VAR_048498ea', 'Lengua Castellana / Inglés'),
+  ('VAR_518787a8', 'Orientación de grupo / Dimensión Comunicativa'),
+  ('VAR_c93088e8', 'Dimensión Estética / Dimensión Cognitiva / Dimensión Comunicativa / Tecnología e Informática'),
+  ('VAR_cb6780c7', 'Inglés / Matemáticas / Lengua Castellana / Ciencias Naturales / Ciencias Sociales'),
+  ('VAR_cf491399', 'Inglés / Tecnología e Informática / Dimensión Comunicativa'),
+  ('VAR_a8c8e9de', 'Educación Religiosa / Ética y Valores / Matemáticas / Lengua Castellana'),
+  ('VAR_7f9f3c20', 'Inglés / Matemáticas'),
+  ('VAR_660c15b8', 'Ética y Valores / Matemáticas / Ciencias Sociales'),
+  ('VAR_e8c68cf9', 'Matemáticas / Ciencias Sociales / Ciencias Naturales'),
+  ('VAR_d6071385', 'Orientación de grupo / Dimensión Estética / Dimensión Cognitiva'),
+  ('VAR_00e1b018', 'Dimensión Comunicativa / Dimensión Estética / Dimensión Cognitiva'),
+  ('VAR_b231106e', 'Ciencias Sociales / Ciencias Naturales'),
+  ('VAR_ea677e30', 'Lengua Castellana / Ciencias Naturales')
 ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), activo = 1;
 
 -- Docentes que no aparecen en este horario quedan inactivos (ya no hacen parte del plantel).
@@ -105,8 +120,10 @@ INSERT INTO franjas_horarias (nivel_id, numero, hora_inicio, hora_fin, es_descan
   (1, 1, '07:00', '08:00', 0),
   (1, 2, '08:00', '08:40', 0),
   (1, 3, '08:40', '09:00', 1),
-  (1, 4, '10:45', '11:10', 1),
-  (1, 5, '11:10', '12:00', 0);
+  (1, 4, '09:00', '10:00', 0),
+  (1, 5, '10:00', '10:45', 0),
+  (1, 6, '10:45', '11:10', 1),
+  (1, 7, '11:10', '12:00', 0);
 
 INSERT INTO horarios (grupo_id, dia_semana, franja_id, asignatura_id, docente_id)
 SELECT g.id, v.dia, f.id, a.id, d.id FROM (
@@ -421,10 +438,42 @@ SELECT g.id, v.dia, f.id, a.id, d.id FROM (
   UNION ALL SELECT 'Transición' AS grupo, 5 AS dia, '07:00' AS ini, '08:00' AS fin, 'D_COG' AS asig, 'KENIA CASTILLO' AS doc
   UNION ALL SELECT 'Transición' AS grupo, 5 AS dia, '08:00' AS ini, '08:40' AS fin, 'D_COG' AS asig, 'KENIA CASTILLO' AS doc
   UNION ALL SELECT 'Transición' AS grupo, 5 AS dia, '11:10' AS ini, '12:00' AS fin, 'D_ETICA' AS asig, 'KENIA CASTILLO' AS doc
+  UNION ALL SELECT '9A' AS grupo, 2 AS dia, '09:35' AS ini, '10:30' AS fin, 'L_CAST' AS asig, 'ANA GOMEZ' AS doc
+  UNION ALL SELECT '9A' AS grupo, 2 AS dia, '10:30' AS ini, '11:20' AS fin, 'VAR_ac9a1d53' AS asig, NULL AS doc
+  UNION ALL SELECT '11A' AS grupo, 2 AS dia, '10:30' AS ini, '11:20' AS fin, 'VAR_0ed3eb2b' AS asig, NULL AS doc
+  UNION ALL SELECT '9A' AS grupo, 2 AS dia, '11:40' AS ini, '12:40' AS fin, 'VAR_048498ea' AS asig, 'ANA GOMEZ' AS doc
+  UNION ALL SELECT '11B' AS grupo, 2 AS dia, '13:00' AS ini, '13:45' AS fin, 'L_CAST' AS asig, 'ANA GOMEZ' AS doc
+  UNION ALL SELECT 'Jardín' AS grupo, 1 AS dia, '07:00' AS ini, '08:00' AS fin, 'VAR_518787a8' AS asig, 'AURA CARABALLO' AS doc
+  UNION ALL SELECT 'Jardín' AS grupo, 1 AS dia, '09:00' AS ini, '10:00' AS fin, 'VAR_c93088e8' AS asig, 'AURA CARABALLO' AS doc
+  UNION ALL SELECT 'Jardín' AS grupo, 1 AS dia, '10:00' AS ini, '10:45' AS fin, 'VAR_c93088e8' AS asig, 'AURA CARABALLO' AS doc
+  UNION ALL SELECT '2A' AS grupo, 1 AS dia, '09:05' AS ini, '10:00' AS fin, 'VAR_cb6780c7' AS asig, NULL AS doc
+  UNION ALL SELECT '1A' AS grupo, 1 AS dia, '09:05' AS ini, '10:00' AS fin, 'INGLES' AS asig, 'GISELLA CARTAGENA' AS doc
+  UNION ALL SELECT 'Transición' AS grupo, 1 AS dia, '09:00' AS ini, '10:00' AS fin, 'VAR_cf491399' AS asig, NULL AS doc
+  UNION ALL SELECT '4A' AS grupo, 1 AS dia, '09:05' AS ini, '10:00' AS fin, 'VAR_a8c8e9de' AS asig, NULL AS doc
+  UNION ALL SELECT '4A' AS grupo, 1 AS dia, '10:00' AS ini, '11:00' AS fin, 'VAR_7f9f3c20' AS asig, NULL AS doc
+  UNION ALL SELECT '1A' AS grupo, 1 AS dia, '10:00' AS ini, '11:00' AS fin, 'INGLES' AS asig, 'GISELLA CARTAGENA' AS doc
+  UNION ALL SELECT 'Transición' AS grupo, 1 AS dia, '10:00' AS ini, '10:45' AS fin, 'VAR_cf491399' AS asig, NULL AS doc
+  UNION ALL SELECT '2A' AS grupo, 1 AS dia, '10:00' AS ini, '11:00' AS fin, 'VAR_660c15b8' AS asig, NULL AS doc
+  UNION ALL SELECT '5A' AS grupo, 1 AS dia, '09:05' AS ini, '10:00' AS fin, 'VAR_e8c68cf9' AS asig, NULL AS doc
+  UNION ALL SELECT 'Transición' AS grupo, 1 AS dia, '07:00' AS ini, '08:00' AS fin, 'VAR_d6071385' AS asig, 'KENIA CASTILLO' AS doc
+  UNION ALL SELECT 'Transición' AS grupo, 1 AS dia, '08:00' AS ini, '08:40' AS fin, 'VAR_00e1b018' AS asig, 'KENIA CASTILLO' AS doc
+  UNION ALL SELECT '11B' AS grupo, 3 AS dia, '12:15' AS ini, '13:00' AS fin, 'TEC_INFO' AS asig, 'LAURA GONZALEZ' AS doc
+  UNION ALL SELECT '10A' AS grupo, 2 AS dia, '06:45' AS ini, '07:35' AS fin, 'MATEM' AS asig, 'MANUEL WARNES' AS doc
+  UNION ALL SELECT '11A' AS grupo, 2 AS dia, '09:35' AS ini, '10:30' AS fin, 'MATEM' AS asig, 'MANUEL WARNES' AS doc
+  UNION ALL SELECT '8A' AS grupo, 2 AS dia, '09:35' AS ini, '10:30' AS fin, 'EMPREND' AS asig, 'MANUEL WARNES' AS doc
+  UNION ALL SELECT '11B' AS grupo, 2 AS dia, '11:20' AS ini, '12:00' AS fin, 'MATEM' AS asig, 'MANUEL WARNES' AS doc
+  UNION ALL SELECT '10A' AS grupo, 2 AS dia, '11:20' AS ini, '12:00' AS fin, 'MATEM' AS asig, 'MANUEL WARNES' AS doc
+  UNION ALL SELECT '5A' AS grupo, 1 AS dia, '10:00' AS ini, '11:00' AS fin, 'VAR_b231106e' AS asig, 'MARIA CLAUDIA' AS doc
+  UNION ALL SELECT '10A' AS grupo, 1 AS dia, '12:15' AS ini, '13:00' AS fin, 'FISICA' AS asig, 'MAURICIO CUADRADO' AS doc
+  UNION ALL SELECT '8A' AS grupo, 1 AS dia, '09:35' AS ini, '10:30' AS fin, 'VAR_ea677e30' AS asig, NULL AS doc
+  UNION ALL SELECT '8A' AS grupo, 1 AS dia, '10:30' AS ini, '11:20' AS fin, 'L_CAST' AS asig, 'PETRONA ALTAMIRANDA' AS doc
+  UNION ALL SELECT '11A' AS grupo, 1 AS dia, '09:35' AS ini, '10:30' AS fin, 'C_NAT' AS asig, 'SHIRLEY PEDROZA' AS doc
+  UNION ALL SELECT '6A' AS grupo, 4 AS dia, '10:30' AS ini, '11:20' AS fin, 'ETICA' AS asig, 'WENDY PERTUZ' AS doc
+  UNION ALL SELECT '9A' AS grupo, 4 AS dia, '10:30' AS ini, '11:20' AS fin, 'ARTIST' AS asig, 'WENDY PERTUZ' AS doc
 ) v
 JOIN grupos g ON g.nombre = v.grupo COLLATE utf8mb4_unicode_ci
 JOIN franjas_horarias f ON f.nivel_id = g.nivel_id AND f.hora_inicio = v.ini AND f.hora_fin = v.fin
 JOIN asignaturas a ON a.codigo_excel = v.asig COLLATE utf8mb4_unicode_ci
-JOIN docentes d ON d.codigo_excel = v.doc COLLATE utf8mb4_unicode_ci;
+LEFT JOIN docentes d ON d.codigo_excel = v.doc COLLATE utf8mb4_unicode_ci;
 
 COMMIT;

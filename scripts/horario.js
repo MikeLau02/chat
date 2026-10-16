@@ -2,11 +2,17 @@
 // horario_2026.sql para la base del chatbot, y deja en horario_revisar.csv
 // las filas que no se pueden cargar sin ayuda de una persona.
 //
-// Uso: node scripts/horario.js <horario_2026.csv> <carpeta de salida>
+// Uso: node scripts/horario.js <horario_2026.csv> <carpeta de salida> [horario_ajustes.csv]
+//
+// horario_ajustes.csv resuelve a mano las filas que mezclan varias clases en una
+// celda: dice qué asignatura y grupo trae cada una. Si en ese periodo un grupo
+// recibe varias asignaturas, se carga una sola clase con todas ("Inglés / Ética y
+// Valores"); si son de distintos docentes, sin docente. Lo que se infiere queda en
+// horario_aproximado.csv para que el colegio lo confirme.
 const fs = require('fs');
 const path = require('path');
 
-const [entrada, salida = '.'] = process.argv.slice(2);
+const [entrada, salida = '.', ajustesCsv] = process.argv.slice(2);
 if (!entrada) {
   console.error('Uso: node scripts/horario.js <horario_2026.csv> <carpeta de salida>');
   process.exit(1);
@@ -202,6 +208,68 @@ for (const b of bloques) {
 }
 
 // ---------------------------------------------------------------------
+// Ajustes a mano de las filas que mezclan varias clases
+// ---------------------------------------------------------------------
+
+const aproximados = [];
+if (ajustesCsv) {
+  const crypto = require('crypto');
+  const [cab, ...filasAj] = leerCsv(fs.readFileSync(ajustesCsv, 'utf8'));
+  const c = (n) => cab.indexOf(n);
+  const porCodigo = new Map(ASIGNATURAS.map((a) => [a[1], a[2]]));
+  const resueltas = new Set();
+  const celdas = new Map(); // grupo|dia|ini|fin -> {grupo, dia, inicio, fin, clases: [{codigo, docente}], filas}
+
+  for (const f of filasAj) {
+    if (!f[c('fila')]) continue;
+    const fila = Number(f[c('fila')]);
+    const docente = f[c('docente')];
+    const dia = DIAS[sinTildes(f[c('dia')].toLowerCase())];
+    const horas = {};
+    for (const parte of f[c('horas')].trim().split(/\s+/)) {
+      const [nivel, rango] = parte.includes('=') ? parte.split('=') : ['*', parte];
+      horas[nivel.toLowerCase()] = rango.split('-');
+    }
+    for (const par of f[c('clases')].trim().split(/\s+/)) {
+      const [codigo, grupo] = par.split(':');
+      if (!porCodigo.has(codigo)) throw new Error(`Fila ${fila}: asignatura ${codigo} desconocida`);
+      const [inicio, fin] = horas[nivelDe(grupo).toLowerCase()] || horas['*'];
+      const k = `${grupo}|${dia}|${inicio}|${fin}`;
+      if (!celdas.has(k)) celdas.set(k, { grupo, dia, inicio, fin, clases: [], filas: new Set() });
+      const celda = celdas.get(k);
+      if (!celda.clases.some((x) => x.codigo === codigo && x.docente === docente)) celda.clases.push({ codigo, docente });
+      celda.filas.add(fila);
+    }
+    resueltas.add(fila);
+  }
+
+  for (const celda of celdas.values()) {
+    const { grupo, dia, inicio, fin } = celda;
+    const choque = validos.find((v) => v.grupo === grupo && v.dia === dia && inicio < v.fin && v.inicio < fin);
+    const nombres = [...new Set(celda.clases.map((x) => porCodigo.get(x.codigo)))];
+    const docentesCelda = [...new Set(celda.clases.map((x) => x.docente))];
+    const filasTxt = [...celda.filas].join(' ');
+    const diaTxt = Object.keys(DIAS)[dia - 1];
+    if (choque) {
+      aproximados.push({ filas: filasTxt, grupo, dia: diaTxt, hora: `${inicio}-${fin}`, cargado: '',
+        nota: `No se cargó: el grupo ya tiene ${choque.asignatura} (${choque.docente})` });
+      continue;
+    }
+    let codigo = celda.clases[0].codigo;
+    let asignatura = nombres[0];
+    if (nombres.length > 1) {
+      asignatura = nombres.join(' / ').slice(0, 100);
+      codigo = `VAR_${crypto.createHash('md5').update(asignatura).digest('hex').slice(0, 8)}`;
+    }
+    const docente = docentesCelda.length === 1 ? docentesCelda[0] : null;
+    validos.push({ numeroFila: celda.filas.values().next().value, docente, dia, inicio, fin, codigo, asignatura, grupo });
+    aproximados.push({ filas: filasTxt, grupo, dia: diaTxt, hora: `${inicio}-${fin}`,
+      cargado: `${asignatura}${docente ? ` (${docente})` : ` (${docentesCelda.join(', ')})`}`, nota: 'Cargado' });
+  }
+  for (let i = revisar.length - 1; i >= 0; i--) if (resueltas.has(revisar[i].fila)) revisar.splice(i, 1);
+}
+
+// ---------------------------------------------------------------------
 // Generación del SQL
 // ---------------------------------------------------------------------
 
@@ -226,7 +294,7 @@ for (const b of validos) {
   franjas[nivel].set(`${b.inicio}-${b.fin}`, [b.inicio, b.fin]);
 }
 
-const docentes = [...new Set(validos.map((b) => b.docente))].sort();
+const docentes = [...new Set(validos.map((b) => b.docente).filter(Boolean))].sort();
 const asignaturasUsadas = new Map(validos.map((b) => [b.codigo, b.asignatura]));
 
 const lineas = [
@@ -270,13 +338,13 @@ lineas.push(valoresFranjas.join(',\n') + ';', '');
 lineas.push('INSERT INTO horarios (grupo_id, dia_semana, franja_id, asignatura_id, docente_id)');
 lineas.push('SELECT g.id, v.dia, f.id, a.id, d.id FROM (');
 lineas.push(validos.map((b, i) =>
-  `  ${i ? 'UNION ALL ' : ''}SELECT ${sql(b.grupo)} AS grupo, ${b.dia} AS dia, '${b.inicio}' AS ini, '${b.fin}' AS fin, ${sql(b.codigo)} AS asig, ${sql(b.docente)} AS doc`,
+  `  ${i ? 'UNION ALL ' : ''}SELECT ${sql(b.grupo)} AS grupo, ${b.dia} AS dia, '${b.inicio}' AS ini, '${b.fin}' AS fin, ${sql(b.codigo)} AS asig, ${b.docente ? sql(b.docente) : 'NULL'} AS doc`,
 ).join('\n'));
 lineas.push(') v');
 lineas.push('JOIN grupos g ON g.nombre = v.grupo COLLATE utf8mb4_unicode_ci');
 lineas.push('JOIN franjas_horarias f ON f.nivel_id = g.nivel_id AND f.hora_inicio = v.ini AND f.hora_fin = v.fin');
 lineas.push('JOIN asignaturas a ON a.codigo_excel = v.asig COLLATE utf8mb4_unicode_ci');
-lineas.push('JOIN docentes d ON d.codigo_excel = v.doc COLLATE utf8mb4_unicode_ci;', '');
+lineas.push('LEFT JOIN docentes d ON d.codigo_excel = v.doc COLLATE utf8mb4_unicode_ci;', '');
 lineas.push('COMMIT;', '');
 
 fs.writeFileSync(path.join(salida, 'horario_2026.sql'), lineas.join('\n'));
@@ -286,8 +354,14 @@ const csvRevisar = ['fila,docente,dia,hora,clase,motivo',
     .map((r) => [r.fila, r.docente, r.dia, r.hora, r.clase, r.motivo].map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))];
 fs.writeFileSync(path.join(salida, 'horario_revisar.csv'), csvRevisar.join('\n') + '\n');
 
+if (ajustesCsv) {
+  const csvAprox = ['filas,grupo,dia,hora,cargado,nota',
+    ...aproximados.map((r) => [r.filas, r.grupo, r.dia, r.hora, r.cargado, r.nota].map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))];
+  fs.writeFileSync(path.join(salida, 'horario_aproximado.csv'), csvAprox.join('\n') + '\n');
+}
+
 console.log(JSON.stringify({
-  filas: filas.length, cargadas: validos.length, revisar: revisar.length,
+  filas: filas.length, cargadas: validos.length, revisar: revisar.length, aproximados: aproximados.length,
   grupos, docentes: docentes.length, asignaturas: asignaturasUsadas.size,
   motivos: revisar.reduce((acc, r) => { const k = r.motivo.startsWith('Se cruza') ? 'Choque con otra clase' : r.motivo; acc[k] = (acc[k] || 0) + 1; return acc; }, {}),
 }, null, 2));

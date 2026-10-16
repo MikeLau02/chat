@@ -5,9 +5,15 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { consulta, una } = require('./db');
 const whatsapp = require('./whatsapp');
+const archivos = require('./archivos');
+const { registrarMensaje } = require('./bot');
 
 const router = express.Router();
-router.use(express.urlencoded({ extended: false }));
+// Los formularios de subida (rutas que terminan en /archivo) traen el archivo en
+// base64 y se leen más abajo, con un límite mayor y solo después de iniciar sesión.
+const formularioNormal = express.urlencoded({ extended: false });
+const formularioArchivo = express.urlencoded({ extended: false, limit: '15mb' });
+router.use((req, res, next) => (req.path.endsWith('/archivo') ? next() : formularioNormal(req, res, next)));
 
 const SECRETO = process.env.PANEL_SECRET || crypto.randomBytes(32).toString('hex');
 const HORAS_SESION = 12;
@@ -53,9 +59,12 @@ function pagina(titulo, cuerpo, admin, aviso = '') {
   const menu = admin ? `
     <nav>
       <a href="/panel">Inicio</a>
+      <a href="/panel/metricas">Métricas</a>
+      <a href="/panel/historial">Historial</a>
       <a href="/panel/asesor">Asesor</a>
       <a href="/panel/actividades">Actividades</a>
       <a href="/panel/circular">Circular</a>
+      <a href="/panel/horarios">Horarios</a>
       <a href="/panel/enlaces">Enlaces y textos</a>
       <a href="/panel/sin-respuesta">Sin respuesta</a>
       <a href="/panel/cuentas">Cuentas</a>
@@ -94,6 +103,18 @@ function pagina(titulo, cuerpo, admin, aviso = '') {
   .gris { color:#5f6b76; font-size:13px; }
   .fila2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
   .scroll { overflow-x:auto; }
+  .barra { background:var(--suave); border-radius:4px; min-width:60px; }
+  .barra span { display:block; height:16px; background:var(--verde); border-radius:4px; }
+  .barra.roja span { background:#c0392b; }
+  form.filtro { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:0 0 16px; }
+  form.filtro label { font-weight:400; font-size:13px; }
+  form.filtro input { width:auto; }
+  .chat { display:flex; flex-direction:column; gap:8px; }
+  .burbuja { max-width:80%; padding:8px 10px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
+  .burbuja.entrante { align-self:flex-start; background:var(--suave); border:1px solid var(--borde); }
+  .burbuja.saliente { align-self:flex-end; background:#e8f5ee; border:1px solid #b9dfc9; }
+  .burbuja.fallo { background:#fdecea; border-color:#f5c2bd; }
+  .burbuja small { display:block; color:#5f6b76; font-size:12px; margin-top:4px; }
 </style></head><body>
 <header>Chatbot Colegio Visión Mundial · Panel</header>${menu}
 <main>${aviso}<h1>${esc(titulo)}</h1>${cuerpo}</main></body></html>`;
@@ -111,6 +132,36 @@ const volver = (res, ruta, mensaje, error = false) =>
   res.redirect(`${ruta}?${error ? 'error' : 'ok'}=${encodeURIComponent(mensaje)}`);
 
 const envolver = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+// Formulario de subida: el navegador convierte el archivo en base64 y lo envía
+// en un campo normal, así no hace falta una librería para formularios multipart.
+function formularioSubida(accion, { acepta, etiqueta, boton, maximoMb }) {
+  return `<form class="caja subida" method="post" action="${accion}" data-maximo="${maximoMb}">
+      <label>${etiqueta} <input type="file" accept="${acepta}" required></label>
+      <input type="hidden" name="archivo"><input type="hidden" name="nombre">
+      <button class="boton">${boton}</button>
+    </form>`;
+}
+
+const SCRIPT_SUBIDA = `<script>
+document.querySelectorAll('form.subida').forEach((f) => f.addEventListener('submit', (e) => {
+  if (f.dataset.listo) return;
+  e.preventDefault();
+  const archivo = f.querySelector('input[type=file]').files[0];
+  if (!archivo) return;
+  if (archivo.size > Number(f.dataset.maximo) * 1048576) { alert('El archivo pesa más de ' + f.dataset.maximo + ' MB.'); return; }
+  const lector = new FileReader();
+  lector.onload = () => {
+    f.querySelector('input[name=archivo]').value = lector.result;
+    f.querySelector('input[name=nombre]').value = archivo.name.replace(/\\.[^.]+$/, '');
+    f.dataset.listo = '1';
+    f.querySelector('button').disabled = true;
+    f.querySelector('button').textContent = 'Subiendo…';
+    f.submit();
+  };
+  lector.readAsDataURL(archivo);
+}));
+</script>`;
 
 // ---------------------------------------------------------------------
 // Ingreso
@@ -236,12 +287,18 @@ function telefonoVisible(t) {
   return t ? `+${t.slice(0, 2)} ${t.slice(2, 5)} ${t.slice(5, 8)} ${t.slice(8)}` : '(borrado)';
 }
 
+// Cómo se muestra a quien escribió: nombre de WhatsApp y teléfono, si se conocen.
+function quienEs(u) {
+  const tel = u.telefono ? telefonoVisible(u.telefono) : (u.bsuid ? 'sin teléfono visible' : '(borrado)');
+  return u.nombre ? `${u.nombre} · ${tel}` : tel;
+}
+
 router.get('/asesor', envolver(async (req, res) => {
   const abiertas = await consulta(
-    `SELECT s.*, u.telefono FROM solicitudes_asesor s LEFT JOIN usuarios_whatsapp u ON u.id = s.usuario_id
+    `SELECT s.*, u.telefono, u.bsuid, u.nombre FROM solicitudes_asesor s LEFT JOIN usuarios_whatsapp u ON u.id = s.usuario_id
       WHERE s.estado <> 'atendida' ORDER BY s.fecha`);
   const cerradas = await consulta(
-    `SELECT s.*, u.telefono, a.nombre AS admin FROM solicitudes_asesor s
+    `SELECT s.*, u.telefono, u.bsuid, u.nombre, a.nombre AS admin FROM solicitudes_asesor s
        LEFT JOIN usuarios_whatsapp u ON u.id = s.usuario_id LEFT JOIN administradores a ON a.id = s.atendida_por
       WHERE s.estado = 'atendida' ORDER BY s.atendida_en DESC LIMIT 20`);
   const tarjetas = abiertas.map((s) => {
@@ -249,7 +306,7 @@ router.get('/asesor', envolver(async (req, res) => {
     const fueraDeVentana = horas > 23.5;
     return `
     <form class="caja" method="post" action="/panel/asesor/${s.id}">
-      <div><b>${esc(telefonoVisible(s.telefono))}</b> <span class="gris">· ${esc(s.fecha)}</span></div>
+      <div><b>${esc(quienEs(s))}</b> <span class="gris">· ${esc(s.fecha)}</span></div>
       <div>${s.mensaje ? esc(s.mensaje).replace(/\n/g, '<br>') : '<span class="gris">Todavía no escribe su pregunta.</span>'}</div>
       ${fueraDeVentana ? '<div class="aviso error">Pasaron más de 24 horas: WhatsApp ya no permite responder gratis por el bot. Escríbele desde el celular del colegio o márcala como atendida.</div>' : ''}
       <label>Respuesta <textarea name="respuesta" ${fueraDeVentana ? 'disabled' : ''} placeholder="Escribe la respuesta que recibirá por WhatsApp"></textarea></label>
@@ -264,22 +321,25 @@ router.get('/asesor', envolver(async (req, res) => {
     ${tarjetas || '<p>No hay solicitudes abiertas. 🎉</p>'}
     <h2>Últimas atendidas</h2>
     <div class="scroll"><table><tr><th>Fecha</th><th>Teléfono</th><th>Pregunta</th><th>Respuesta</th><th>Atendió</th></tr>
-      ${cerradas.map((s) => `<tr><td>${esc(s.atendida_en)}</td><td>${esc(telefonoVisible(s.telefono))}</td><td>${esc(s.mensaje)}</td><td>${esc(s.respuesta)}</td><td>${esc(s.admin)}</td></tr>`).join('') || '<tr><td colspan="5">Ninguna todavía.</td></tr>'}
+      ${cerradas.map((s) => `<tr><td>${esc(s.atendida_en)}</td><td>${esc(quienEs(s))}</td><td>${esc(s.mensaje)}</td><td>${esc(s.respuesta)}</td><td>${esc(s.admin)}</td></tr>`).join('') || '<tr><td colspan="5">Ninguna todavía.</td></tr>'}
     </table></div>`, req.admin, avisoDe(req)));
 }));
 
 router.post('/asesor/:id', envolver(async (req, res) => {
   const s = await una(
-    `SELECT s.*, u.telefono FROM solicitudes_asesor s LEFT JOIN usuarios_whatsapp u ON u.id = s.usuario_id
+    `SELECT s.*, u.telefono, u.bsuid FROM solicitudes_asesor s LEFT JOIN usuarios_whatsapp u ON u.id = s.usuario_id
       WHERE s.id = ? AND s.estado <> 'atendida'`, [req.params.id]);
   if (!s) return volver(res, '/panel/asesor', 'Esa solicitud ya fue atendida.', true);
   const respuesta = String(req.body.respuesta || '').trim();
   if (req.body.accion === 'responder') {
     if (!respuesta) return volver(res, '/panel/asesor', 'Escribe la respuesta antes de enviarla.', true);
+    const texto = `👩‍🏫 Colegio Visión Mundial:\n\n${respuesta}`;
     try {
-      await whatsapp.enviar(s.telefono, { tipo: 'texto', texto: `👩‍🏫 Colegio Visión Mundial:\n\n${respuesta}` });
+      await whatsapp.enviar(s.telefono || s.bsuid, { tipo: 'texto', texto });
+      await registrarMensaje(s.usuario_id, 'saliente', { texto, origen: 'asesor' });
     } catch (err) {
       console.error('No se pudo enviar la respuesta de asesor', err);
+      await registrarMensaje(s.usuario_id, 'saliente', { texto, origen: 'asesor', error: err.message });
       return volver(res, '/panel/asesor', 'WhatsApp no aceptó el mensaje. Revisa la conexión del bot e inténtalo de nuevo.', true);
     }
   }
@@ -382,29 +442,46 @@ router.post('/actividades/:id/publicar', envolver(async (req, res) => {
 router.get('/circular', envolver(async (req, res) => {
   const actual = await una('SELECT * FROM circulares WHERE es_actual = 1');
   const anteriores = await consulta('SELECT * FROM circulares WHERE es_actual = 0 ORDER BY fecha_publicacion DESC LIMIT 10');
+  const pdfs = await archivos.listar('circular');
+  const filaPdf = (c) => {
+    const pdf = pdfs.get(c.id);
+    const estado = pdf ? `<a href="${esc(pdf.ruta)}" target="_blank" rel="noopener">PDF subido</a>`
+      : c.archivo_url ? `<a href="${esc(c.archivo_url)}" target="_blank" rel="noopener">Enlace</a>` : '<span class="gris">Sin PDF</span>';
+    return `${estado}
+      <details><summary>${pdf ? 'Cambiar' : 'Subir'} PDF</summary>
+        ${formularioSubida(`/panel/circular/${c.id}/archivo`, { acepta: 'application/pdf', etiqueta: 'PDF (máximo 10 MB)', boton: 'Subir PDF', maximoMb: 10 })}
+        ${pdf ? `<form method="post" action="/panel/circular/${c.id}/borrar-pdf"><button class="link">Quitar el PDF subido</button></form>` : ''}
+      </details>`;
+  };
   res.send(pagina('Circular actual', `
     ${actual ? `<p>El bot envía la <b>Circular N° ${esc(actual.numero)}</b>: ${esc(actual.titulo)} (${esc(actual.fecha_publicacion)}).
-      ${actual.archivo_url ? `<a href="${esc(actual.archivo_url)}" target="_blank" rel="noopener">Ver PDF</a>` : '<br><span class="gris">Sin PDF: el bot solo envía el título y el enlace de Comunicaciones.</span>'}</p>` : '<p>No hay circular actual.</p>'}
+      ${pdfs.get(actual.id) ? `<a href="${esc(pdfs.get(actual.id).ruta)}" target="_blank" rel="noopener">Ver PDF subido</a>`
+        : actual.archivo_url ? `<a href="${esc(actual.archivo_url)}" target="_blank" rel="noopener">Ver PDF (enlace)</a>`
+          : '<br><span class="gris">Sin PDF: el bot solo envía el título y el enlace de Comunicaciones.</span>'}</p>` : '<p>No hay circular actual.</p>'}
     <h2>Publicar una circular nueva</h2>
-    <p class="gris">La nueva reemplaza a la actual en el bot. El PDF debe estar en un enlace público que termine en .pdf o se abra directo (por ejemplo, la página del colegio).</p>
+    <p class="gris">La nueva reemplaza a la actual en el bot. Después de publicarla puedes subir su PDF aquí mismo; el bot lo envía como documento. El enlace es opcional y solo se usa si no subes el PDF.</p>
     <form class="caja" method="post" action="/panel/circular">
       <div class="fila2">
         <label>Número <input name="numero" required maxlength="20" placeholder="10"></label>
         <label>Fecha <input type="date" name="fecha_publicacion" required></label>
       </div>
       <label>Título <input name="titulo" required maxlength="200"></label>
-      <label>Enlace del PDF <input type="url" name="archivo_url"></label>
+      <label>Enlace del PDF (opcional) <input type="url" name="archivo_url"></label>
       <button class="boton">Publicar como circular actual</button>
     </form>
-    ${actual ? `<h2>Cambiar el PDF de la circular actual</h2>
+    ${actual ? `<h2>PDF de la circular actual</h2>
+    ${formularioSubida(`/panel/circular/${actual.id}/archivo`, { acepta: 'application/pdf', etiqueta: 'PDF de la circular (máximo 10 MB)', boton: 'Subir PDF', maximoMb: 10 })}
+    ${pdfs.get(actual.id) ? `<form method="post" action="/panel/circular/${actual.id}/borrar-pdf"><button class="link">Quitar el PDF subido</button></form>` : ''}
+    <details><summary>Usar un enlace en lugar de subir el PDF</summary>
     <form class="caja" method="post" action="/panel/circular/${actual.id}/pdf">
       <label>Enlace del PDF <input type="url" name="archivo_url" value="${esc(actual.archivo_url || '')}"></label>
       <button class="boton secundario">Guardar enlace</button>
-    </form>` : ''}
+    </form></details>` : ''}
     <h2>Anteriores</h2>
-    <table><tr><th>N°</th><th>Título</th><th>Fecha</th></tr>
-      ${anteriores.map((c) => `<tr><td>${esc(c.numero)}</td><td>${esc(c.titulo)}</td><td>${esc(c.fecha_publicacion)}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
-    </table>`, req.admin, avisoDe(req)));
+    <p class="gris">Las que tengan PDF aparecen en el bot como "Circulares anteriores" (las 5 más recientes) y se envían como documento.</p>
+    <div class="scroll"><table><tr><th>N°</th><th>Título</th><th>Fecha</th><th>PDF</th></tr>
+      ${anteriores.map((c) => `<tr><td>${esc(c.numero)}</td><td>${esc(c.titulo)}</td><td>${esc(c.fecha_publicacion)}</td><td>${filaPdf(c)}</td></tr>`).join('') || '<tr><td colspan="4">—</td></tr>'}
+    </table></div>${SCRIPT_SUBIDA}`, req.admin, avisoDe(req)));
 }));
 
 router.post('/circular', envolver(async (req, res) => {
@@ -418,10 +495,60 @@ router.post('/circular', envolver(async (req, res) => {
   return volver(res, '/panel/circular', `Circular N° ${numero} publicada.`);
 }));
 
+router.post('/circular/:id/archivo', formularioArchivo, envolver(async (req, res) => {
+  const c = await una('SELECT id, numero FROM circulares WHERE id = ?', [req.params.id]);
+  if (!c) return volver(res, '/panel/circular', 'No existe esa circular.', true);
+  const buffer = archivos.desdeDataUrl(req.body.archivo);
+  const error = archivos.validar(buffer, 'pdf');
+  if (error) return volver(res, '/panel/circular', error, true);
+  await archivos.guardar('circular', c.id, `Circular-${c.numero}`, buffer, req.admin.id);
+  return volver(res, '/panel/circular', `PDF de la circular N° ${c.numero} guardado. El bot ya lo envía como documento.`);
+}));
+
+router.post('/circular/:id/borrar-pdf', envolver(async (req, res) => {
+  await archivos.borrar('circular', Number(req.params.id));
+  volver(res, '/panel/circular', 'PDF quitado.');
+}));
+
 router.post('/circular/:id/pdf', envolver(async (req, res) => {
   await consulta('UPDATE circulares SET archivo_url = ? WHERE id = ?',
     [String(req.body.archivo_url || '').trim() || null, req.params.id]);
   volver(res, '/panel/circular', 'Enlace guardado.');
+}));
+
+// ---------------------------------------------------------------------
+// Imagen del horario de cada grupo
+// ---------------------------------------------------------------------
+
+router.get('/horarios', envolver(async (req, res) => {
+  const grupos = await consulta('SELECT id, nombre FROM grupos WHERE activo = 1 ORDER BY orden, nombre');
+  const imagenes = await archivos.listar('horario_grupo');
+  const filas = grupos.map((g) => {
+    const img = imagenes.get(g.id);
+    return `<tr><td><b>${esc(g.nombre)}</b></td>
+      <td>${img ? `<a href="${esc(img.ruta)}" target="_blank" rel="noopener"><img src="${esc(img.ruta)}" alt="Horario ${esc(g.nombre)}" style="max-width:120px;max-height:90px;border:1px solid var(--borde)"></a>` : '<span class="gris">Sin imagen</span>'}</td>
+      <td>${formularioSubida(`/panel/horarios/${g.id}/archivo`, { acepta: 'image/jpeg,image/png', etiqueta: img ? 'Cambiar imagen' : 'Subir imagen', boton: 'Guardar', maximoMb: 5 })}
+        ${img ? `<form method="post" action="/panel/horarios/${g.id}/borrar"><button class="link">Quitar imagen</button></form>` : ''}</td></tr>`;
+  }).join('');
+  res.send(pagina('Horario en imagen por grupo', `
+    <p class="gris">Cuando alguien pide el horario de un grupo que tiene imagen, el bot le envía la imagen y luego le ofrece ver cada día en texto. Imagen JPG o PNG, máximo 5 MB.</p>
+    <div class="scroll"><table><tr><th>Grupo</th><th>Imagen</th><th></th></tr>${filas}</table></div>
+    ${SCRIPT_SUBIDA}`, req.admin, avisoDe(req)));
+}));
+
+router.post('/horarios/:id/archivo', formularioArchivo, envolver(async (req, res) => {
+  const g = await una('SELECT id, nombre FROM grupos WHERE id = ? AND activo = 1', [req.params.id]);
+  if (!g) return volver(res, '/panel/horarios', 'No existe ese grupo.', true);
+  const buffer = archivos.desdeDataUrl(req.body.archivo);
+  const error = archivos.validar(buffer, 'imagen');
+  if (error) return volver(res, '/panel/horarios', error, true);
+  await archivos.guardar('horario_grupo', g.id, `Horario-${g.nombre}`, buffer, req.admin.id);
+  return volver(res, '/panel/horarios', `Imagen del horario de ${g.nombre} guardada.`);
+}));
+
+router.post('/horarios/:id/borrar', envolver(async (req, res) => {
+  await archivos.borrar('horario_grupo', Number(req.params.id));
+  volver(res, '/panel/horarios', 'Imagen quitada.');
 }));
 
 // ---------------------------------------------------------------------
@@ -475,6 +602,195 @@ router.get('/sin-respuesta', envolver(async (req, res) => {
 router.post('/sin-respuesta/:id', envolver(async (req, res) => {
   await consulta("UPDATE consultas_sin_respuesta SET estado = 'revisada' WHERE id = ?", [req.params.id]);
   volver(res, '/panel/sin-respuesta', 'Marcada como revisada.');
+}));
+
+// ---------------------------------------------------------------------
+// Métricas e historial de conversaciones
+// ---------------------------------------------------------------------
+
+const DIAS_SEMANA = ['', 'Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const esFecha = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+const hoyColombia = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota' }).format(new Date());
+
+// Rango de fechas del filtro (por defecto, los últimos 30 días).
+function rango(req) {
+  const hasta = esFecha(req.query.hasta) ? req.query.hasta : hoyColombia();
+  const desde = esFecha(req.query.desde) ? req.query.desde
+    : new Date(Date.parse(`${hasta}T12:00:00Z`) - 29 * 86400000).toISOString().slice(0, 10);
+  return { desde, hasta, params: [desde, hasta] };
+}
+const entre = (col = 'fecha') => `${col} >= ? AND ${col} < ? + INTERVAL 1 DAY`;
+
+function filtro(accion, { desde, hasta }, extra = '') {
+  return `<form class="filtro" method="get" action="${accion}">
+    <label>Desde <input type="date" name="desde" value="${esc(desde)}"></label>
+    <label>Hasta <input type="date" name="hasta" value="${esc(hasta)}"></label>
+    ${extra}
+    <button class="boton">Ver</button>
+  </form>`;
+}
+
+function barras(filas, etiqueta, valor, { roja = false } = {}) {
+  const max = Math.max(1, ...filas.map((f) => Number(f[valor]) || 0));
+  return filas.map((f) => `<tr><td>${esc(f[etiqueta])}</td><td style="width:55%"><div class="barra${roja ? ' roja' : ''}"><span style="width:${(100 * (Number(f[valor]) || 0) / max).toFixed(1)}%"></span></div></td><td>${f[valor]}</td></tr>`).join('');
+}
+
+router.get('/metricas', envolver(async (req, res) => {
+  const r = rango(req);
+  const p = r.params;
+  const c = await una(`SELECT
+      (SELECT COUNT(*) FROM mensajes WHERE direccion = 'entrante' AND ${entre()}) AS recibidos,
+      (SELECT COUNT(*) FROM mensajes WHERE direccion = 'saliente' AND error IS NULL AND ${entre()}) AS enviados,
+      (SELECT COUNT(*) FROM mensajes WHERE direccion = 'saliente' AND error IS NOT NULL AND ${entre()}) AS fallidos,
+      (SELECT COUNT(DISTINCT usuario_id) FROM mensajes WHERE direccion = 'entrante' AND ${entre()}) AS personas,
+      (SELECT COUNT(*) FROM usuarios_whatsapp WHERE primer_contacto >= ? AND primer_contacto < ? + INTERVAL 1 DAY) AS nuevas,
+      (SELECT COUNT(*) FROM interacciones WHERE ${entre()}) AS consultas,
+      (SELECT COUNT(*) FROM solicitudes_asesor WHERE ${entre()}) AS asesor,
+      (SELECT COUNT(*) FROM consultas_sin_respuesta WHERE ${entre()}) AS sin_respuesta`,
+  [...p, ...p, ...p, ...p, ...p, ...p, ...p, ...p]);
+  const modulos = await consulta(
+    `SELECT modulo, COUNT(*) AS n FROM interacciones WHERE ${entre()} GROUP BY modulo ORDER BY n DESC`, p);
+  const opciones = await consulta(
+    `SELECT modulo, opcion, COUNT(*) AS n FROM interacciones WHERE opcion IS NOT NULL AND ${entre()}
+      GROUP BY modulo, opcion ORDER BY n DESC LIMIT 15`, p);
+  const dias = await consulta(
+    `SELECT DATE(fecha) AS dia, COUNT(*) AS consultas, COUNT(DISTINCT usuario_id) AS personas
+       FROM interacciones WHERE ${entre()} GROUP BY DATE(fecha) ORDER BY dia`, p);
+  const horas = await consulta(
+    `SELECT HOUR(fecha) AS h, COUNT(*) AS n FROM mensajes WHERE direccion = 'entrante' AND ${entre()}
+      GROUP BY HOUR(fecha) ORDER BY h`, p);
+  const semana = await consulta(
+    `SELECT DAYOFWEEK(fecha) AS d, COUNT(*) AS n FROM mensajes WHERE direccion = 'entrante' AND ${entre()}
+      GROUP BY DAYOFWEEK(fecha) ORDER BY (DAYOFWEEK(fecha) + 5) % 7`, p);
+  const activos = await consulta(
+    `SELECT u.id, u.nombre, u.telefono, u.bsuid, COUNT(*) AS n, MAX(m.fecha) AS ultimo
+       FROM mensajes m JOIN usuarios_whatsapp u ON u.id = m.usuario_id
+      WHERE m.direccion = 'entrante' AND ${entre('m.fecha')}
+      GROUP BY u.id ORDER BY n DESC LIMIT 10`, p);
+  const fallos = await consulta(
+    `SELECT m.fecha, m.error, m.tipo, u.id AS usuario_id, u.nombre, u.telefono, u.bsuid
+       FROM mensajes m LEFT JOIN usuarios_whatsapp u ON u.id = m.usuario_id
+      WHERE m.direccion = 'saliente' AND m.error IS NOT NULL AND ${entre('m.fecha')}
+      ORDER BY m.fecha DESC LIMIT 20`, p);
+  const consulta_ = `desde=${r.desde}&hasta=${r.hasta}`;
+  const vacio = (n) => `<tr><td colspan="${n}">Sin datos en estas fechas.</td></tr>`;
+  res.send(pagina('Métricas', `
+    ${filtro('/panel/metricas', r)}
+    <div class="cifras">
+      <div class="cifra"><b>${c.personas}</b>personas escribieron</div>
+      <div class="cifra"><b>${c.nuevas}</b>personas nuevas</div>
+      <div class="cifra"><b>${c.recibidos}</b>mensajes recibidos</div>
+      <div class="cifra"><b>${c.enviados}</b>respuestas enviadas</div>
+      <div class="cifra"><b>${c.fallidos}</b>respuestas que no llegaron</div>
+      <div class="cifra"><b>${c.consultas}</b>consultas al menú</div>
+      <div class="cifra"><b>${c.asesor}</b>pidieron asesor</div>
+      <div class="cifra"><b>${c.sin_respuesta}</b>preguntas sin respuesta</div>
+    </div>
+    <p class="gris">Los mensajes y las respuestas se guardan desde esta versión del bot; las consultas por módulo vienen desde el inicio del piloto.
+      Descargar para Excel: <a href="/panel/metricas/mensajes.csv?${consulta_}">mensajes</a> ·
+      <a href="/panel/metricas/consultas.csv?${consulta_}">consultas por módulo</a></p>
+    <h2>Consultas por módulo</h2>
+    <div class="scroll"><table><tr><th>Módulo</th><th></th><th>Consultas</th></tr>
+      ${barras(modulos.map((m) => ({ ...m, nombre: NOMBRES_MODULO[m.modulo] || m.modulo })), 'nombre', 'n') || vacio(3)}
+    </table></div>
+    <h2>Opciones más pedidas</h2>
+    <div class="scroll"><table><tr><th>Módulo</th><th>Opción</th><th>Veces</th></tr>
+      ${opciones.map((o) => `<tr><td>${esc(NOMBRES_MODULO[o.modulo] || o.modulo)}</td><td>${esc(o.opcion)}</td><td>${o.n}</td></tr>`).join('') || vacio(3)}
+    </table></div>
+    <h2>Por día</h2>
+    <div class="scroll"><table><tr><th>Día</th><th></th><th>Consultas</th><th>Personas</th></tr>
+      ${dias.map((d) => { const max = Math.max(...dias.map((x) => x.consultas)); return `<tr><td>${esc(d.dia)}</td><td style="width:50%"><div class="barra"><span style="width:${(100 * d.consultas / max).toFixed(1)}%"></span></div></td><td>${d.consultas}</td><td>${d.personas}</td></tr>`; }).join('') || vacio(4)}
+    </table></div>
+    <div class="fila2">
+      <div><h2>Hora en que escriben</h2>
+        <table><tr><th>Hora</th><th></th><th>Mensajes</th></tr>
+          ${barras(horas.map((h) => ({ ...h, hora: `${h.h}:00` })), 'hora', 'n') || vacio(3)}</table></div>
+      <div><h2>Día de la semana</h2>
+        <table><tr><th>Día</th><th></th><th>Mensajes</th></tr>
+          ${barras(semana.map((d) => ({ ...d, dia: DIAS_SEMANA[d.d] })), 'dia', 'n') || vacio(3)}</table></div>
+    </div>
+    <h2>Quiénes escriben más</h2>
+    <div class="scroll"><table><tr><th>Persona</th><th>Mensajes</th><th>Último</th></tr>
+      ${activos.map((u) => `<tr><td><a href="/panel/historial/${u.id}">${esc(quienEs(u))}</a></td><td>${u.n}</td><td>${esc(u.ultimo)}</td></tr>`).join('') || vacio(3)}
+    </table></div>
+    <h2>Respuestas que no llegaron</h2>
+    <p class="gris">Si alguien dice que el bot no le responde, aquí aparece el motivo que dio WhatsApp.</p>
+    <div class="scroll"><table><tr><th>Fecha</th><th>Persona</th><th>Motivo</th></tr>
+      ${fallos.map((f) => `<tr><td>${esc(f.fecha)}</td><td>${f.usuario_id ? `<a href="/panel/historial/${f.usuario_id}">${esc(quienEs(f))}</a>` : ''}</td><td>${esc(f.error)}</td></tr>`).join('') || '<tr><td colspan="3">Ninguna. 🎉</td></tr>'}
+    </table></div>`, req.admin, avisoDe(req)));
+}));
+
+// CSV con punto y coma y BOM, para que Excel en español lo abra con tildes y columnas.
+function enviarCsv(res, nombre, columnas, filas) {
+  const celda = (v) => { const t = String(v ?? ''); return /[;"\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const lineas = [columnas.map(([titulo]) => titulo).join(';'), ...filas.map((f) => columnas.map(([, clave]) => celda(f[clave])).join(';'))];
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${nombre}"`);
+  res.send('﻿' + lineas.join('\r\n'));
+}
+
+router.get('/metricas/mensajes.csv', envolver(async (req, res) => {
+  const r = rango(req);
+  const filas = await consulta(
+    `SELECT m.fecha, m.direccion, m.origen, m.tipo, m.texto, m.error, u.nombre, u.telefono
+       FROM mensajes m LEFT JOIN usuarios_whatsapp u ON u.id = m.usuario_id
+      WHERE ${entre('m.fecha')} ORDER BY m.fecha, m.id`, r.params);
+  enviarCsv(res, `mensajes_${r.desde}_${r.hasta}.csv`, [['Fecha', 'fecha'], ['Nombre', 'nombre'], ['Teléfono', 'telefono'],
+    ['Dirección', 'direccion'], ['Origen', 'origen'], ['Tipo', 'tipo'], ['Texto', 'texto'], ['Error', 'error']], filas);
+}));
+
+router.get('/metricas/consultas.csv', envolver(async (req, res) => {
+  const r = rango(req);
+  const filas = await consulta(
+    `SELECT i.fecha, i.modulo, i.opcion, u.nombre, u.telefono
+       FROM interacciones i LEFT JOIN usuarios_whatsapp u ON u.id = i.usuario_id
+      WHERE ${entre('i.fecha')} ORDER BY i.fecha, i.id`, r.params);
+  enviarCsv(res, `consultas_${r.desde}_${r.hasta}.csv`, [['Fecha', 'fecha'], ['Nombre', 'nombre'], ['Teléfono', 'telefono'],
+    ['Módulo', 'modulo'], ['Opción', 'opcion']], filas.map((f) => ({ ...f, modulo: NOMBRES_MODULO[f.modulo] || f.modulo })));
+}));
+
+router.get('/historial', envolver(async (req, res) => {
+  const r = rango(req);
+  const buscar = String(req.query.buscar || '').trim().slice(0, 60);
+  const condicion = buscar ? 'AND (u.nombre LIKE ? OR u.telefono LIKE ?)' : '';
+  const extra = buscar ? [`%${buscar}%`, `%${buscar.replace(/\D/g, '') || buscar}%`] : [];
+  const filas = await consulta(
+    `SELECT u.id, u.nombre, u.telefono, u.bsuid, u.primer_contacto, u.ultimo_contacto,
+            (SELECT COUNT(*) FROM mensajes m WHERE m.usuario_id = u.id AND m.direccion = 'entrante' AND ${entre('m.fecha')}) AS recibidos,
+            (SELECT COUNT(*) FROM mensajes m WHERE m.usuario_id = u.id AND m.error IS NOT NULL AND ${entre('m.fecha')}) AS fallidos,
+            (SELECT COUNT(*) FROM interacciones i WHERE i.usuario_id = u.id AND ${entre('i.fecha')}) AS consultas
+       FROM usuarios_whatsapp u
+      WHERE u.ultimo_contacto >= ? AND u.primer_contacto < ? + INTERVAL 1 DAY ${condicion}
+      ORDER BY u.ultimo_contacto DESC LIMIT 300`,
+    [...r.params, ...r.params, ...r.params, ...r.params, ...extra]);
+  res.send(pagina('Historial', `
+    <p class="gris">Quién ha escrito al bot. Toca una persona para ver su conversación.</p>
+    ${filtro('/panel/historial', r, `<label>Nombre o teléfono <input name="buscar" value="${esc(buscar)}" placeholder="Buscar"></label>`)}
+    <div class="scroll"><table><tr><th>Persona</th><th>Primer contacto</th><th>Último contacto</th><th>Mensajes</th><th>Consultas</th><th>No llegaron</th></tr>
+      ${filas.map((u) => `<tr><td><a href="/panel/historial/${u.id}">${esc(quienEs(u))}</a></td><td>${esc(u.primer_contacto)}</td><td>${esc(u.ultimo_contacto)}</td>
+        <td>${u.recibidos}</td><td>${u.consultas}</td><td>${u.fallidos ? `<b style="color:#c0392b">${u.fallidos}</b>` : 0}</td></tr>`).join('') || '<tr><td colspan="6">Nadie escribió en estas fechas.</td></tr>'}
+    </table></div>`, req.admin, avisoDe(req)));
+}));
+
+router.get('/historial/:id', envolver(async (req, res) => {
+  const u = await una('SELECT * FROM usuarios_whatsapp WHERE id = ?', [req.params.id]);
+  if (!u) return volver(res, '/panel/historial', 'Esa persona no existe.', true);
+  const mensajes = (await consulta(
+    'SELECT * FROM mensajes WHERE usuario_id = ? ORDER BY fecha DESC, id DESC LIMIT 300', [u.id])).reverse();
+  const modulos = await consulta(
+    'SELECT modulo, COUNT(*) AS n FROM interacciones WHERE usuario_id = ? GROUP BY modulo ORDER BY n DESC', [u.id]);
+  const burbujas = mensajes.map((m) => `<div class="burbuja ${m.direccion}${m.error ? ' fallo' : ''}">${m.texto ? esc(m.texto) : `<i>[${esc(m.tipo)}]</i>`}<small>${esc(m.fecha)}${m.origen === 'asesor' ? ' · respuesta del asesor' : ''}${m.error ? ` · no llegó: ${esc(m.error)}` : ''}</small></div>`).join('');
+  res.send(pagina(quienEs(u), `
+    <p><a href="/panel/historial">← Volver al historial</a></p>
+    <div class="cifras">
+      <div class="cifra"><b>${esc(u.primer_contacto.slice(0, 10))}</b>primer contacto</div>
+      <div class="cifra"><b>${esc(u.ultimo_contacto.slice(0, 10))}</b>último contacto</div>
+      ${modulos.slice(0, 3).map((m) => `<div class="cifra"><b>${m.n}</b>${esc(NOMBRES_MODULO[m.modulo] || m.modulo)}</div>`).join('')}
+    </div>
+    <h2>Conversación</h2>
+    ${mensajes.length === 300 ? '<p class="gris">Se muestran los últimos 300 mensajes.</p>' : ''}
+    <div class="chat">${burbujas || '<p class="gris">No hay mensajes guardados de esta persona (el historial empezó con esta versión del bot).</p>'}</div>`,
+  req.admin, avisoDe(req)));
 }));
 
 // ---------------------------------------------------------------------

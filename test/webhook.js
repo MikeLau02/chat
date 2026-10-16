@@ -41,6 +41,27 @@ const { pool } = require('../src/db');
   assert.equal(textos.length, 2, 'aviso de datos + menú');
   assert.equal(enviados.filter((e) => e.status === 'read').length, 1);
   assert.ok(textos[1].text.body.includes('1. Circulares'));
+
+  // Usuario con nombre de usuario de WhatsApp: llega sin "from" (teléfono), solo con su BSUID.
+  enviados.length = 0;
+  const bsuid = 'CO.' + Date.now();
+  const sinTelefono = JSON.stringify({ entry: [{ changes: [{ value: {
+    contacts: [{ profile: { name: 'Prueba Usuario', username: 'prueba' }, user_id: bsuid }],
+    messages: [{ id: 'wamid.2' + bsuid, from_user_id: bsuid, type: 'text', text: { body: 'hola' } }],
+  } }] }] });
+  const firma2 = 'sha256=' + crypto.createHmac('sha256', 'clave').update(sinTelefono).digest('hex');
+  r = await fetchReal(`${base}/webhook`, { method: 'POST', body: sinTelefono, headers: { 'content-type': 'application/json', 'x-hub-signature-256': firma2 } });
+  assert.equal(r.status, 200);
+  await new Promise((ok) => setTimeout(ok, 500));
+  const respuestas = enviados.filter((e) => e.type === 'text');
+  assert.ok(respuestas.length >= 1, 'responde al usuario sin teléfono');
+  assert.ok(respuestas.every((e) => e.recipient === bsuid && !e.to), 'responde por "recipient" con el BSUID');
+  const { una } = require('../src/db');
+  const u = await una('SELECT * FROM usuarios_whatsapp WHERE bsuid = ?', [bsuid]);
+  assert.equal(u.nombre, 'Prueba Usuario');
+  const h = await una("SELECT COUNT(*) AS n FROM mensajes WHERE usuario_id = ? AND direccion = 'saliente'", [u.id]);
+  assert.equal(h.n, respuestas.length, 'el historial guarda las respuestas');
+
   console.log('Webhook OK:', enviados.length, 'llamadas a Meta');
   srv.close(); await pool.end();
 })().catch(async (e) => { console.error(e); process.exit(1); });

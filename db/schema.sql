@@ -193,11 +193,14 @@ CREATE TABLE palabras_clave (
 
 CREATE TABLE usuarios_whatsapp (
   id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  telefono            VARCHAR(20) NOT NULL,        -- formato E.164 sin "+": 573001234567
+  telefono            VARCHAR(20) NULL,            -- formato E.164 sin "+": 573001234567 (Meta puede no enviarlo)
+  bsuid               VARCHAR(80) NULL,            -- identificador por negocio de quien usa nombre de usuario
+  nombre              VARCHAR(120) NULL,           -- nombre del perfil de WhatsApp
   grupo_preferido_id  INT UNSIGNED NULL,
   primer_contacto     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   ultimo_contacto     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_usuarios_telefono (telefono),
+  UNIQUE KEY uq_usuarios_bsuid (bsuid),
   CONSTRAINT fk_usuarios_grupo FOREIGN KEY (grupo_preferido_id) REFERENCES grupos(id)
     ON DELETE SET NULL
 ) ENGINE=InnoDB;

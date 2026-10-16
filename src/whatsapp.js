@@ -37,20 +37,27 @@ function partirTexto(texto) {
   return partes;
 }
 
+// A quién va el mensaje: un teléfono (solo dígitos) va en "to"; el identificador
+// por negocio (BSUID, p. ej. "CO.1234…") de quien usa nombre de usuario va en "recipient".
+function destino(id) {
+  return /^\d+$/.test(String(id)) ? { to: String(id) } : { recipient: String(id) };
+}
+
 // Envía un mensaje del formato que produce bot.js:
 //   { tipo: 'texto', texto } | { tipo: 'documento', url, nombre, texto } | { tipo: 'imagen', url, texto }
-async function enviar(telefono, mensaje) {
+async function enviar(para, mensaje) {
+  const a = destino(para);
   if (mensaje.tipo === 'documento') {
     return llamar({
-      to: telefono, type: 'document',
+      ...a, type: 'document',
       document: { link: mensaje.url, filename: mensaje.nombre, caption: mensaje.texto },
     });
   }
   if (mensaje.tipo === 'imagen') {
-    return llamar({ to: telefono, type: 'image', image: { link: mensaje.url, caption: mensaje.texto } });
+    return llamar({ ...a, type: 'image', image: { link: mensaje.url, caption: mensaje.texto } });
   }
   for (const parte of partirTexto(mensaje.texto)) {
-    await llamar({ to: telefono, type: 'text', text: { body: parte, preview_url: true } });
+    await llamar({ ...a, type: 'text', text: { body: parte, preview_url: true } });
   }
 }
 
@@ -90,4 +97,4 @@ function firmaValida(cuerpoCrudo, cabecera) {
     crypto.timingSafeEqual(Buffer.from(recibida), Buffer.from(esperada));
 }
 
-module.exports = { enviar, marcarLeido, firmaValida, partirTexto, infoNumero, registrarNumero };
+module.exports = { enviar, destino, marcarLeido, firmaValida, partirTexto, infoNumero, registrarNumero };

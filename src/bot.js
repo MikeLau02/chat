@@ -2,6 +2,7 @@
 // texto del usuario y devuelve la lista de mensajes que se deben responder.
 const { consulta, una } = require('./db');
 const { minutosSesion } = require('./config');
+const archivos = require('./archivos');
 
 const DIAS = ['', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'];
 const PALABRAS_DIA = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5 };
@@ -40,6 +41,7 @@ function contienePalabra(texto, palabra) {
 }
 
 const texto = (t) => ({ tipo: 'texto', texto: t });
+const imagen = (url, t) => ({ tipo: 'imagen', url, texto: t });
 
 // "13:45:00" -> "1:45", como se escribe en el colegio.
 function hora(h) {
@@ -91,14 +93,38 @@ const PIE = '\n\n0. Menú principal';
 // Usuarios, estado de la conversación y registro de uso
 // ---------------------------------------------------------------------
 
-async function obtenerUsuario(telefono) {
-  const existente = await una('SELECT * FROM usuarios_whatsapp WHERE telefono = ?', [telefono]);
+// Busca o crea al usuario. Recibe el teléfono o { telefono, bsuid, nombre }: quien
+// usa nombre de usuario en WhatsApp puede llegar sin teléfono, solo con su BSUID.
+async function obtenerUsuario(ident) {
+  const { telefono = null, bsuid = null, nombre = null } = typeof ident === 'object' ? ident : { telefono: ident };
+  if (!telefono && !bsuid) throw new Error('Mensaje sin teléfono ni identificador de usuario');
+  let existente = bsuid ? await una('SELECT * FROM usuarios_whatsapp WHERE bsuid = ?', [bsuid]) : null;
+  if (!existente && telefono) existente = await una('SELECT * FROM usuarios_whatsapp WHERE telefono = ?', [telefono]);
   if (existente) {
-    await consulta('UPDATE usuarios_whatsapp SET ultimo_contacto = NOW() WHERE id = ?', [existente.id]);
-    return { ...existente, nuevo: false };
+    // Completa lo que falte (un mismo usuario puede llegar unas veces con teléfono y otras sin él).
+    await consulta(
+      `UPDATE usuarios_whatsapp SET ultimo_contacto = NOW(), telefono = COALESCE(telefono, ?),
+         bsuid = COALESCE(bsuid, ?), nombre = COALESCE(?, nombre) WHERE id = ?`,
+      [telefono, bsuid, nombre ? String(nombre).slice(0, 120) : null, existente.id]);
+    return { ...existente, telefono: existente.telefono || telefono, bsuid: existente.bsuid || bsuid, nuevo: false };
   }
-  const res = await consulta('INSERT INTO usuarios_whatsapp (telefono) VALUES (?)', [telefono]);
-  return { id: res.insertId, telefono, grupo_preferido_id: null, nuevo: true };
+  const res = await consulta('INSERT INTO usuarios_whatsapp (telefono, bsuid, nombre) VALUES (?, ?, ?)',
+    [telefono, bsuid, nombre ? String(nombre).slice(0, 120) : null]);
+  return { id: res.insertId, telefono, bsuid, nombre, grupo_preferido_id: null, nuevo: true };
+}
+
+// Dirección a la que se responde: el teléfono si se conoce, si no el BSUID.
+const destinoDe = (u) => u.telefono || u.bsuid;
+
+// Historial de mensajes (entrantes y respuestas). Si falla, no impide responder.
+async function registrarMensaje(usuarioId, direccion, { tipo = 'texto', texto: t = null, error = null, origen = 'bot' } = {}) {
+  try {
+    await consulta('INSERT INTO mensajes (usuario_id, direccion, tipo, texto, error, origen) VALUES (?, ?, ?, ?, ?, ?)',
+      [usuarioId, direccion, String(tipo).slice(0, 20), t == null ? null : String(t).slice(0, 4000),
+        error ? String(error).slice(0, 500) : null, origen]);
+  } catch (err) {
+    console.error('No se pudo guardar el mensaje en el historial:', err.message);
+  }
 }
 
 async function leerEstado(usuarioId) {
@@ -170,21 +196,56 @@ async function abrirModulo(u, modulo) {
 // 1. Circulares
 // ---------------------------------------------------------------------
 
+async function urlCircular(c) {
+  return (await archivos.urlDe('circular', c.id)) || c.archivo_url;
+}
+
+function tituloCircular(c) {
+  return `📄 Circular N° ${c.numero}: ${c.titulo}\nPublicada el ${fechaLarga(c.fecha_publicacion)}`;
+}
+
+// Circulares anteriores que tienen PDF (subido en el panel o con enlace).
+async function circularesConPdf() {
+  const lista = await consulta(
+    `SELECT c.* FROM circulares c
+      WHERE c.es_actual = 0
+        AND (c.archivo_url IS NOT NULL OR EXISTS (SELECT 1 FROM archivos a WHERE a.tipo = 'circular' AND a.ref_id = c.id))
+      ORDER BY c.fecha_publicacion DESC, c.id DESC LIMIT 5`);
+  return lista;
+}
+
 async function circulares(u) {
   await registrar(u.id, 'circulares', 'actual');
   await guardarEstado(u.id, 'menu');
   const c = await una('SELECT * FROM circulares WHERE es_actual = 1');
   const com = await enlace('comunicaciones');
-  const anteriores = com ? `¿Buscas una circular anterior? Encuéntralas todas aquí: ${com.url}` : '';
-  if (!c) return [texto(`Por ahora no hay una circular publicada.\n\n${anteriores}${PIE}`)];
-  const titulo = `📄 Circular N° ${c.numero}: ${c.titulo}\nPublicada el ${fechaLarga(c.fecha_publicacion)}`;
-  if (c.archivo_url) {
+  const anteriores = await circularesConPdf();
+  let pie = '';
+  if (anteriores.length) {
+    await guardarEstado(u.id, 'circulares', { lista: anteriores.map((a) => a.id) });
+    pie = `Circulares anteriores (escribe el número para recibirla):\n\n${listaNumerada(anteriores, (a) => `N° ${a.numero}: ${a.titulo}`)}`;
+  }
+  if (com) pie += `${pie ? '\n\n' : ''}¿Buscas otra circular? Encuéntralas todas aquí: ${com.url}`;
+  if (!c) return [texto(`Por ahora no hay una circular publicada.${pie ? `\n\n${pie}` : ''}${PIE}`)];
+  const url = await urlCircular(c);
+  if (url) {
     return [
-      { tipo: 'documento', url: c.archivo_url, nombre: `Circular ${c.numero}.pdf`, texto: titulo },
-      texto(`${anteriores}${PIE}`),
+      { tipo: 'documento', url, nombre: `Circular ${c.numero}.pdf`, texto: tituloCircular(c) },
+      texto(`${pie}${PIE}`.replace(/^\n+/, '')),
     ];
   }
-  return [texto(`${titulo}\n\n${anteriores}${PIE}`)];
+  return [texto(`${tituloCircular(c)}${pie ? `\n\n${pie}` : ''}${PIE}`)];
+}
+
+async function enviarCircular(u, id) {
+  const c = await una('SELECT * FROM circulares WHERE id = ?', [id]);
+  const url = c && await urlCircular(c);
+  if (!url) return null;
+  await registrar(u.id, 'circulares', `anterior:${c.numero}`);
+  return [
+    { tipo: 'documento', url, nombre: `Circular ${c.numero}.pdf`, texto: tituloCircular(c) },
+    texto(`Escribe otro número de la lista para recibir otra circular.${PIE}`),
+  ];
 }
 
 // ---------------------------------------------------------------------
@@ -258,7 +319,7 @@ async function textoHorarioDocente(docenteId, dia) {
     '\n_Las horas que no aparecen son horas libres._';
 }
 
-async function mostrarHorario(u, { grupoId, docenteId }, dia) {
+async function mostrarHorario(u, { grupoId, docenteId }, dia, { conImagen = false } = {}) {
   let nombre;
   let generar;
   if (grupoId) {
@@ -283,7 +344,14 @@ async function mostrarHorario(u, { grupoId, docenteId }, dia) {
     bloques.push(`*${DIAS[d]}*\n${contenido || 'Sin clases registradas.'}`);
   }
   const otroDia = '\n\nEscribe otro día (por ejemplo, *martes*) o *semana* para ver la semana completa.';
-  return [texto(`🕒 Horario de ${nombre}\n\n${aviso}${bloques.join('\n\n')}${otroDia}${PIE}`)];
+  const url = grupoId && (conImagen || dia === 'semana') ? await archivos.urlDe('horario_grupo', grupoId) : null;
+  if (url && dia === 'semana') {
+    return [imagen(url, `🕒 Horario de ${nombre}`),
+      texto(`Escribe un día (por ejemplo, *martes*) para verlo en texto.${PIE}`)];
+  }
+  const salida = [texto(`🕒 Horario de ${nombre}\n\n${aviso}${bloques.join('\n\n')}${otroDia}${PIE}`)];
+  if (url) salida.unshift(imagen(url, `🕒 Horario de ${nombre}`));
+  return salida;
 }
 
 async function horariosInicio(u) {
@@ -300,6 +368,12 @@ async function horariosInicio(u) {
 
 async function pedirDia(u, datos, nombre) {
   await guardarEstado(u.id, 'horarios_dia', datos);
+  const url = datos.grupoId ? await archivos.urlDe('horario_grupo', datos.grupoId) : null;
+  if (url) {
+    await registrar(u.id, 'horarios', `imagen:${nombre}`);
+    return [imagen(url, `🕒 Horario de ${nombre}`),
+      texto(`Si quieres verlo en texto, elige el día:\n\n1. Lunes\n2. Martes\n3. Miércoles\n4. Jueves\n5. Viernes\n6. Semana completa\n7. Hoy${PIE}`)];
+  }
   return [texto(`¿Qué día quieres ver de ${nombre}?\n\n1. Lunes\n2. Martes\n3. Miércoles\n4. Jueves\n5. Viernes\n6. Semana completa\n7. Hoy${PIE}`)];
 }
 
@@ -593,6 +667,10 @@ async function pasoNumerado(u, estado, n) {
     }
     case 'actividad':
       return pasoActividad(u, n, datos);
+    case 'circulares': {
+      const id = elegido(datos.lista);
+      return id ? enviarCircular(u, id) : null;
+    }
     default:
       return null;
   }
@@ -613,10 +691,10 @@ async function atajoHorario(u, t, estado) {
 
   if (grupo && (pideHorario || dia)) {
     await recordarGrupo(u, grupo.id);
-    return mostrarHorario(u, { grupoId: grupo.id }, dia || diaColombia(0));
+    return mostrarHorario(u, { grupoId: grupo.id }, dia || diaColombia(0), { conImagen: !dia });
   }
   if (contienePalabra(t, 'mi horario') && u.grupo_preferido_id) {
-    return mostrarHorario(u, { grupoId: u.grupo_preferido_id }, dia || diaColombia(0));
+    return mostrarHorario(u, { grupoId: u.grupo_preferido_id }, dia || diaColombia(0), { conImagen: !dia });
   }
   return null;
 }
@@ -625,8 +703,9 @@ async function atajoHorario(u, t, estado) {
 // Punto de entrada
 // ---------------------------------------------------------------------
 
-async function responder(telefono, entrada, { esTexto = true } = {}) {
-  const u = await obtenerUsuario(telefono);
+// "quien" es el usuario ya obtenido con obtenerUsuario, o lo que este recibe.
+async function responder(quien, entrada, { esTexto = true } = {}) {
+  const u = quien && quien.id ? quien : await obtenerUsuario(quien);
   const salida = [];
 
   if (u.nuevo) salida.push(texto(await conEnlaces(await configuracion('aviso_datos'))));
@@ -663,4 +742,4 @@ async function responder(telefono, entrada, { esTexto = true } = {}) {
   return salida;
 }
 
-module.exports = { responder, normalizar };
+module.exports = { responder, normalizar, obtenerUsuario, destinoDe, registrarMensaje };

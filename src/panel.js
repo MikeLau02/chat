@@ -655,18 +655,19 @@ router.get('/metricas', envolver(async (req, res) => {
       GROUP BY modulo, opcion ORDER BY n DESC LIMIT 15`, p);
   const dias = await consulta(
     `SELECT DATE(fecha) AS dia, COUNT(*) AS consultas, COUNT(DISTINCT usuario_id) AS personas
-       FROM interacciones WHERE ${entre()} GROUP BY DATE(fecha) ORDER BY dia`, p);
+       FROM interacciones WHERE ${entre()} GROUP BY DATE(fecha) ORDER BY DATE(fecha)`, p);
   const horas = await consulta(
     `SELECT HOUR(fecha) AS h, COUNT(*) AS n FROM mensajes WHERE direccion = 'entrante' AND ${entre()}
-      GROUP BY HOUR(fecha) ORDER BY h`, p);
+      GROUP BY HOUR(fecha) ORDER BY HOUR(fecha)`, p);
   const semana = await consulta(
     `SELECT DAYOFWEEK(fecha) AS d, COUNT(*) AS n FROM mensajes WHERE direccion = 'entrante' AND ${entre()}
-      GROUP BY DAYOFWEEK(fecha) ORDER BY (DAYOFWEEK(fecha) + 5) % 7`, p);
+      GROUP BY DAYOFWEEK(fecha)`, p);
+  semana.sort((a, b) => (a.d + 5) % 7 - (b.d + 5) % 7); // de lunes a domingo
   const activos = await consulta(
     `SELECT u.id, u.nombre, u.telefono, u.bsuid, COUNT(*) AS n, MAX(m.fecha) AS ultimo
        FROM mensajes m JOIN usuarios_whatsapp u ON u.id = m.usuario_id
       WHERE m.direccion = 'entrante' AND ${entre('m.fecha')}
-      GROUP BY u.id ORDER BY n DESC LIMIT 10`, p);
+      GROUP BY u.id, u.nombre, u.telefono, u.bsuid ORDER BY n DESC LIMIT 10`, p);
   const fallos = await consulta(
     `SELECT m.fecha, m.error, m.tipo, u.id AS usuario_id, u.nombre, u.telefono, u.bsuid
        FROM mensajes m LEFT JOIN usuarios_whatsapp u ON u.id = m.usuario_id
@@ -906,5 +907,14 @@ router.post('/whatsapp/registrar', envolver(async (req, res) => {
   }
   return volver(res, '/panel/whatsapp', 'Número registrado. Ya puede recibir y responder mensajes.');
 }));
+
+// Si una página falla, se muestra el motivo dentro del panel en vez de "Internal Server Error".
+router.use((err, req, res, _next) => {
+  console.error(`Error en el panel (${req.method} ${req.originalUrl}):`, err);
+  res.status(500).send(pagina('Algo salió mal', `
+    <p>Esta página no se pudo cargar. Si se repite, envía una captura de este mensaje a quien mantiene el bot.</p>
+    <p class="gris">Detalle: ${esc(err.message)}</p>
+    <p><a href="/panel">Volver al inicio</a></p>`, req.admin));
+});
 
 module.exports = router;

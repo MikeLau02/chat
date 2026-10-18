@@ -96,7 +96,8 @@ const PIE = '\n\n0. Menú principal';
 // Busca o crea al usuario. Recibe el teléfono o { telefono, bsuid, nombre }: quien
 // usa nombre de usuario en WhatsApp puede llegar sin teléfono, solo con su BSUID.
 async function obtenerUsuario(ident) {
-  const { telefono = null, bsuid = null, nombre = null } = typeof ident === 'object' ? ident : { telefono: ident };
+  if (typeof ident !== 'object') ident = { telefono: ident };
+  const { telefono = null, bsuid = null, nombre = null } = ident;
   if (!telefono && !bsuid) throw new Error('Mensaje sin teléfono ni identificador de usuario');
   let existente = bsuid ? await una('SELECT * FROM usuarios_whatsapp WHERE bsuid = ?', [bsuid]) : null;
   if (!existente && telefono) existente = await una('SELECT * FROM usuarios_whatsapp WHERE telefono = ?', [telefono]);
@@ -108,8 +109,15 @@ async function obtenerUsuario(ident) {
       [telefono, bsuid, nombre ? String(nombre).slice(0, 120) : null, existente.id]);
     return { ...existente, telefono: existente.telefono || telefono, bsuid: existente.bsuid || bsuid, nuevo: false };
   }
-  const res = await consulta('INSERT INTO usuarios_whatsapp (telefono, bsuid, nombre) VALUES (?, ?, ?)',
-    [telefono, bsuid, nombre ? String(nombre).slice(0, 120) : null]);
+  let res;
+  try {
+    res = await consulta('INSERT INTO usuarios_whatsapp (telefono, bsuid, nombre) VALUES (?, ?, ?)',
+      [telefono, bsuid, nombre ? String(nombre).slice(0, 120) : null]);
+  } catch (err) {
+    // Dos mensajes seguidos de alguien nuevo: el otro ya lo creó, así que se usa ese registro.
+    if (err.code === 'ER_DUP_ENTRY' && !ident.reintento) return obtenerUsuario({ telefono, bsuid, nombre, reintento: true });
+    throw err;
+  }
   return { id: res.insertId, telefono, bsuid, nombre, grupo_preferido_id: null, nuevo: true };
 }
 

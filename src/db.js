@@ -1,37 +1,42 @@
+'use strict';
 const mysql = require('mysql2/promise');
-const { databaseUrl } = require('./config');
-
-// Los servicios en la nube (por ejemplo Aiven) entregan una URL con
-// "?ssl-mode=REQUIRED": se quita de la URL y se activa SSL.
-function opciones(url) {
-  const u = new URL(url);
-  const pideSsl = /required|verify/i.test(u.searchParams.get('ssl-mode') || '') || process.env.DATABASE_SSL === 'true';
-  u.searchParams.delete('ssl-mode');
-  return {
-    uri: u.toString(),
-    ssl: pideSsl ? { rejectUnauthorized: false } : undefined,
-  };
-}
+const config = require('./config');
 
 const pool = mysql.createPool({
-  ...opciones(databaseUrl),
-  connectionLimit: 5,
+  ...config.db,
+  waitForConnections: true,
+  connectionLimit: 20,
+  dateStrings: true,      // las fechas llegan como texto 'YYYY-MM-DD HH:MM:SS'
   charset: 'utf8mb4',
-  timezone: '-05:00',
-  dateStrings: true,
+  decimalNumbers: true,
 });
 
-// La base guarda y compara fechas en hora de Colombia (CURDATE, NOW).
-pool.pool.on('connection', (conexion) => conexion.query("SET time_zone = '-05:00'"));
-
-async function consulta(sql, params = []) {
-  const [filas] = await pool.execute(sql, params);
-  return filas;
+/** Ejecuta una consulta y devuelve las filas. */
+async function query(sql, params = []) {
+  const [rows] = await pool.query(sql, params);
+  return rows;
 }
 
-async function una(sql, params = []) {
-  const filas = await consulta(sql, params);
-  return filas[0] || null;
+/**
+ * Ejecuta "fn" dentro de una transacción de base de datos.
+ * Si fn lanza un error se hace ROLLBACK; si no, COMMIT.
+ */
+async function transaccion(fn) {
+  const conn = await pool.getConnection();
+  try {
+    // READ COMMITTED: cada lectura ve lo último confirmado por otros vendedores,
+    // y el bloqueo FOR UPDATE de la fila del estudiante ordena las compras simultáneas.
+    await conn.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+    await conn.beginTransaction();
+    const resultado = await fn(conn);
+    await conn.commit();
+    return resultado;
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) { /* ignorar */ }
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
-module.exports = { pool, consulta, una, opciones };
+module.exports = { pool, query, transaccion };

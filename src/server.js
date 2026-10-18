@@ -1,140 +1,121 @@
-const express = require('express');
+'use strict';
 const config = require('./config');
-const { responder, obtenerUsuario, destinoDe, registrarMensaje } = require('./bot');
-const whatsapp = require('./whatsapp');
-const panel = require('./panel');
+const path = require('path');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const express = require('express');
+const compression = require('compression');
+const session = require('express-session');
+const MySQLStore = require('express-mysql-session')(session);
+const { pool } = require('./db');
+const { cargarUsuario, requiereRol, paginaPara } = require('./middleware/auth');
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', config.trustProxy);
 
-// Se guarda el cuerpo crudo para validar la firma de Meta.
-app.use(express.json({ verify: (req, _res, buf) => { req.cuerpoCrudo = buf; } }));
-
-app.get('/', (_req, res) => res.send('Chatbot Colegio Visión Mundial: en línea'));
-app.use('/panel', panel);
-app.use('/archivos', require('./archivos').router);
-
-// Política de privacidad: Meta pide su enlace para publicar la app.
-const PRIVACIDAD = `<!doctype html><html lang="es"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Política de privacidad · Chatbot Colegio Visión Mundial</title>
-<style>body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 16px;line-height:1.55;color:#1f2933}h1{font-size:1.5rem}h2{font-size:1.1rem;margin-top:1.6rem}</style>
-</head><body>
-<h1>Política de privacidad del chatbot de WhatsApp del Colegio Visión Mundial</h1>
-<p>El Colegio Visión Mundial (Montería, Colombia) usa este chatbot para responder por WhatsApp preguntas de la comunidad educativa sobre horarios, circulares, actividades, plataformas y normas institucionales. Esta política explica qué datos trata y cómo, de acuerdo con la Ley 1581 de 2012 de Colombia.</p>
-<h2>Datos que se recogen</h2>
-<p>El número de WhatsApp de quien escribe, los mensajes que envía al chatbot, las respuestas dadas y la fecha y hora de cada conversación. Si la persona pide hablar con un asesor, también se guarda la pregunta que deja.</p>
-<h2>Para qué se usan</h2>
-<p>Solo para responder las consultas, atender las solicitudes de asesor y mejorar el servicio a partir de las preguntas que el chatbot no supo responder. No se venden ni se comparten con terceros, ni se usan con fines publicitarios.</p>
-<h2>Quién tiene acceso</h2>
-<p>Únicamente el personal autorizado por el colegio que administra el chatbot. Los mensajes viajan por la plataforma de WhatsApp de Meta, que tiene su propia política de privacidad.</p>
-<h2>Cuánto tiempo se guardan</h2>
-<p>Mientras dure el piloto del chatbot y el tiempo necesario para su evaluación. Después se eliminan o se anonimizan.</p>
-<h2>Sus derechos</h2>
-<p>Cualquier persona puede conocer, actualizar, rectificar o pedir que se eliminen sus datos, o dejar de usar el chatbot en cualquier momento. Para hacerlo, puede escribir "asesor" en el chatbot o dirigirse a la secretaría del colegio.</p>
-<p>Última actualización: 7 de octubre de 2026.</p>
-</body></html>`;
-app.get('/privacidad', (_req, res) => res.type('html').send(PRIVACIDAD));
-
-// Verificación del webhook (Meta la hace una sola vez al configurarlo).
-app.get('/webhook', (req, res) => {
-  const ok = req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === config.whatsapp.verifyToken;
-  if (ok) return res.status(200).send(req.query['hub.challenge']);
-  return res.sendStatus(403);
+// Cabeceras básicas de seguridad
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'same-origin');
+  next();
 });
 
-// Meta reintenta si no recibe 200 rápido, así que se responde de inmediato
-// y se descartan los mensajes repetidos.
-const procesados = new Set();
-function yaProcesado(id) {
-  if (procesados.has(id)) return true;
-  procesados.add(id);
-  if (procesados.size > 5000) procesados.delete(procesados.values().next().value);
-  return false;
+// Comprime las respuestas (listas y reportes pesan hasta 10 veces menos por internet)
+app.use(compression());
+app.use(express.json({ limit: '5mb' }));
+
+// Sesiones guardadas en MySQL: sobreviven a reinicios del servidor
+const store = new MySQLStore({ createDatabaseTable: true, clearExpired: true, checkExpirationInterval: 15 * 60 * 1000 }, pool);
+app.use(session({
+  name: 'feria.sid',
+  secret: config.sessionSecret,
+  store,
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  cookie: { httpOnly: true, sameSite: 'lax', secure: 'auto', maxAge: 14 * 60 * 60 * 1000 },
+}));
+app.use(cargarUsuario);
+
+// Las API nunca se guardan en caché: el saldo siempre viene del servidor
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+
+// Comprobación de conexión (la usa el vendedor para saber si hay red)
+app.get('/api/ping', async (req, res) => {
+  try { await pool.query('SELECT 1'); res.json({ ok: true, hora: Date.now() }); } catch (e) { res.status(503).json({ ok: false }); }
+});
+
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/publico', require('./routes/publico'));
+app.use('/api/ventas', requiereRol('VENDEDOR'), require('./routes/ventas'));
+app.use('/api/admin/reportes', requiereRol('ADMIN'), require('./routes/reportes'));
+app.use('/api/admin', requiereRol('ADMIN'), require('./routes/admin'));
+app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
+
+// Librerías del navegador servidas localmente: la feria funciona aunque no haya Internet, solo red local
+const nm = (p) => path.join(__dirname, '..', 'node_modules', p);
+// Las librerías no cambian: el navegador las guarda una semana y no las vuelve a pedir en cada pantalla
+const libreria = { maxAge: '7d' };
+app.use('/vendor/bootstrap', express.static(nm('bootstrap/dist'), libreria));
+app.use('/vendor/bootstrap-icons', express.static(nm('bootstrap-icons/font'), libreria));
+app.use('/vendor/html5-qrcode', express.static(nm('html5-qrcode'), libreria));
+
+// Páginas protegidas por rol
+const publico = path.join(__dirname, '..', 'public');
+app.use('/admin', paginaPara('ADMIN'), express.static(path.join(publico, 'admin')));
+app.use('/vendedor', paginaPara('VENDEDOR'), express.static(path.join(publico, 'vendedor')));
+app.use('/consulta', express.static(path.join(publico, 'consulta'))); // consulta de saldo para compradores (pública)
+app.get('/', (req, res) => {
+  if (!req.usuario) return res.redirect('/login.html');
+  res.redirect(req.usuario.rol === 'ADMIN' ? '/admin/' : '/vendedor/');
+});
+app.use(express.static(publico, { index: false }));
+
+// Manejo de errores: mensajes claros para el usuario, detalles solo en la consola
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err.status && err.status < 500) {
+    return res.status(err.status).json({ error: err.message, ...err.extra });
+  }
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Datos mal formados.' });
+  console.error(new Date().toISOString(), req.method, req.originalUrl, err);
+  const sinBD = ['ECONNREFUSED', 'PROTOCOL_CONNECTION_LOST', 'ER_ACCESS_DENIED_ERROR', 'ER_BAD_DB_ERROR'].includes(err.code);
+  res.status(sinBD ? 503 : 500).json({
+    error: sinBD ? 'No hay conexión con la base de datos. La operación NO se realizó.' : 'Error interno. La operación NO se realizó.',
+  });
+});
+
+function direccionesLocales() {
+  const os = require('os');
+  return Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address);
 }
 
-app.post('/webhook', (req, res) => {
-  if (!whatsapp.firmaValida(req.cuerpoCrudo, req.get('x-hub-signature-256'))) {
-    console.warn('Webhook rechazado: la firma no coincide. Revisa WHATSAPP_APP_SECRET en Render.');
-    return res.sendStatus(401);
-  }
-  console.log('Webhook recibido de Meta');
-  res.sendStatus(200);
-
-  for (const entry of req.body.entry || []) {
-    for (const change of entry.changes || []) {
-      const contactos = change.value?.contacts || [];
-      for (const msg of change.value?.messages || []) {
-        if (yaProcesado(msg.id)) continue;
-        // Quien usa nombre de usuario puede llegar sin "from" (teléfono), solo con "from_user_id".
-        const contacto = contactos.find((c) => (msg.from && c.wa_id === msg.from) || (msg.from_user_id && c.user_id === msg.from_user_id))
-          || (contactos.length === 1 ? contactos[0] : null);
-        atender(msg, contacto).catch((err) => console.error('Error atendiendo mensaje', msg.id, err));
-      }
-    }
-  }
-});
-
-const finDe = (id) => `...${String(id).slice(-4)}`;
-
-async function atender(msg, contacto) {
-  const ident = {
-    telefono: msg.from || contacto?.wa_id || null,
-    bsuid: msg.from_user_id || contacto?.user_id || null,
-    nombre: contacto?.profile?.name || contacto?.profile?.username || null,
-  };
-  const para = ident.telefono || ident.bsuid;
-  if (!para) {
-    console.warn(`Mensaje ${msg.id} sin teléfono ni identificador de usuario: no se puede responder.`);
-    return;
-  }
-  let entrada = '';
-  let esTexto = true;
-  if (msg.type === 'text') entrada = msg.text.body;
-  else if (msg.type === 'interactive') entrada = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
-  else if (msg.type === 'button') entrada = msg.button?.text || '';
-  else esTexto = false;
-
-  console.log(`Mensaje de ${finDe(para)}: tipo ${msg.type}`);
-  whatsapp.marcarLeido(msg.id).catch(() => {});
-  let usuario = null;
-  let mensajes;
+async function iniciar() {
   try {
-    usuario = await obtenerUsuario(ident);
-    await registrarMensaje(usuario.id, 'entrante', { tipo: msg.type, texto: esTexto ? entrada : null });
-    mensajes = await responder(usuario, entrada, { esTexto });
+    await pool.query('SELECT 1 FROM configuracion LIMIT 1');
   } catch (err) {
-    console.error(`Error preparando la respuesta para ${finDe(para)}:`, err);
-    mensajes = [{ tipo: 'texto', texto: 'Tuvimos un problema al responder. Intenta de nuevo o escribe 0 para ir al menú principal.' }];
+    console.error('\n✖ No se pudo conectar a MySQL o la base de datos no está creada.');
+    console.error('  Revise el archivo .env y ejecute "npm run db:init".\n  Detalle:', err.message, '\n');
+    process.exit(1);
   }
-  const destino = usuario ? destinoDe(usuario) : para;
-  const anotar = (m, error) => usuario && registrarMensaje(usuario.id, 'saliente',
-    { tipo: m.tipo || 'texto', texto: m.url ? [m.texto, m.url].filter(Boolean).join('\n') : m.texto, error });
-  for (const m of mensajes) {
-    try {
-      await whatsapp.enviar(destino, m);
-      await anotar(m);
-    } catch (err) {
-      console.error(`No se pudo enviar la respuesta (${m.tipo || 'texto'}) a ${finDe(destino)}:`, err.message);
-      await anotar(m, err.message);
-      // Si falla una imagen o un PDF, se manda como texto con el enlace y se sigue con lo demás.
-      if (m.tipo === 'imagen' || m.tipo === 'documento') {
-        const alterno = { tipo: 'texto', texto: [m.texto, m.url].filter(Boolean).join('\n') };
-        try {
-          await whatsapp.enviar(destino, alterno);
-          await anotar(alterno);
-        } catch (e) {
-          console.error('Tampoco se pudo enviar el texto alterno:', e.message);
-          await anotar(alterno, e.message);
-        }
-      }
+  http.createServer(app).listen(config.port, () => {
+    console.log(`\n✔ Feria QR funcionando en http://localhost:${config.port}`);
+    for (const ip of direccionesLocales()) console.log(`  En la red local: http://${ip}:${config.port}`);
+  });
+  if (config.https) {
+    if (!fs.existsSync(config.sslKey) || !fs.existsSync(config.sslCert)) {
+      console.error('✖ HTTPS=1 pero no se encontró el certificado. Ejecute "npm run cert".');
+    } else {
+      https.createServer({ key: fs.readFileSync(config.sslKey), cert: fs.readFileSync(config.sslCert) }, app).listen(config.httpsPort, () => {
+        console.log(`✔ HTTPS (cámara en celulares) en https://localhost:${config.httpsPort}`);
+        for (const ip of direccionesLocales()) console.log(`  Celulares y tabletas: https://${ip}:${config.httpsPort}`);
+      });
     }
   }
 }
 
-if (require.main === module) {
-  require('./instalar').instalarSiHaceFalta()
-    .catch((err) => console.error('No se pudo preparar la base de datos:', err.message))
-    .finally(() => app.listen(config.port, () => console.log(`Bot escuchando en el puerto ${config.port}`)));
-}
-
+if (require.main === module) iniciar();
 module.exports = app;
